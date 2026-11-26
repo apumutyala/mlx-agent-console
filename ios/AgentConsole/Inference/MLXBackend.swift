@@ -1,10 +1,13 @@
 import Foundation
+import HuggingFace
 import MLX
+import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import Tokenizers
 
-/// The only file that touches MLX. If mlx-swift-lm's API moves, fix it here.
-/// Mirrors the loading path in Apple's LLMEval example.
+/// The only file that touches MLX. Written against mlx-swift-lm 3.33.x
+/// (Hugging Face downloader/tokenizer come from the MLXHuggingFace macros).
 final class MLXBackend: ModelBackend, @unchecked Sendable {
     private let configuration: ModelConfiguration
     private var container: ModelContainer?
@@ -20,11 +23,12 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         if await isLoaded { progress(1); return }
-        // Keep MLX's buffer cache modest on phones; weights dominate memory.
-        MLX.GPU.set(cacheLimit: 32 * 1024 * 1024)
-        let loaded = try await LLMModelFactory.shared.loadContainer(configuration: configuration) { p in
-            progress(p.fractionCompleted)
-        }
+        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
+        MLX.Memory.cacheLimit = 32 * 1024 * 1024
+        let loaded = try await #huggingFaceLoadModelContainer(
+            configuration: configuration,
+            progress: .download { p in progress(p.fractionCompleted) }
+        )
         lock.withLock { container = loaded }
     }
 
@@ -32,11 +36,10 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         guard let container = lock.withLock({ container }) else {
             throw BackendError.notLoaded
         }
-        let session = ChatSession(
-            container,
-            instructions: instructions,
-            generateParameters: GenerateParameters(maxTokens: 1024, temperature: 0.4)
-        )
+        var params = GenerateParameters()
+        params.maxTokens = 1024
+        params.temperature = 0.4
+        let session = ChatSession(container, instructions: instructions, generateParameters: params)
         return MLXConversation(session: session)
     }
 

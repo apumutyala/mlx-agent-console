@@ -7,7 +7,13 @@ options:
 packages:
   MLXSwiftLM:
     url: https://github.com/ml-explore/mlx-swift-lm
-    branch: main                        # pin to a release tag once it builds for you
+    exactVersion: 3.33.0                # needs Swift 6.3 tools -> Xcode 26.4+
+  SwiftHuggingFace:
+    url: https://github.com/huggingface/swift-huggingface
+    from: 0.9.0
+  SwiftTransformers:
+    url: https://github.com/huggingface/swift-transformers
+    from: 1.3.0
 targets:
   AgentConsole:
     type: application
@@ -19,6 +25,12 @@ targets:
         product: MLXLLM
       - package: MLXSwiftLM
         product: MLXLMCommon
+      - package: MLXSwiftLM
+        product: MLXHuggingFace
+      - package: SwiftHuggingFace
+        product: HuggingFace
+      - package: SwiftTransformers
+        product: Tokenizers
     entitlements:
       path: AgentConsole/AgentConsole.entitlements
       properties:
