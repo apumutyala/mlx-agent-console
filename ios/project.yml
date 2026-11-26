@@ -1,0 +1,48 @@
+# XcodeGen spec. On a Mac:  brew install xcodegen && cd ios && xcodegen && open AgentConsole.xcodeproj
+name: AgentConsole
+options:
+  bundleIdPrefix: com.example          # change to your team's prefix
+  deploymentTarget:
+    iOS: "26.0"                         # BGContinuedProcessingTask is iOS/iPadOS 26+
+packages:
+  MLXSwiftLM:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    branch: main                        # pin to a release tag once it builds for you
+targets:
+  AgentConsole:
+    type: application
+    platform: iOS
+    scheme: {}                          # shared scheme so `xcodebuild -scheme` works in CI
+    sources: [AgentConsole]
+    dependencies:
+      - package: MLXSwiftLM
+        product: MLXLLM
+      - package: MLXSwiftLM
+        product: MLXLMCommon
+    entitlements:
+      path: AgentConsole/AgentConsole.entitlements
+      properties:
+        # Background GPU Access capability (needed to keep MLX on the GPU in a BGContinuedProcessingTask)
+        com.apple.developer.background-tasks.continued-processing.gpu: true
+        # LLM weights need more than the default jetsam limit (same as Apple's LLMEval)
+        com.apple.developer.kernel.increased-memory-limit: true
+    info:
+      path: AgentConsole/Info.plist
+      properties:
+        CFBundleDisplayName: Agent Console
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations~ipad:
+          [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown,
+           UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        BGTaskSchedulerPermittedIdentifiers:
+          - $(PRODUCT_BUNDLE_IDENTIFIER).summarize.*
+        NSLocalNetworkUsageDescription: Connects to your job worker on the local network.
+        NSAppTransportSecurity:
+          # Allows http:// to IPs and .local names (e.g. a Tailscale 100.x address).
+          # For anything else, put the worker behind HTTPS (e.g. `tailscale serve`).
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
