@@ -9,3 +9,4 @@ ios/AgentConsole/Info.plist
 ios/AgentConsole/AgentConsole.entitlements
 *.ipa
 .DS_Store
+dist/

@@ -1,7 +1,7 @@
 # XcodeGen spec. On a Mac:  brew install xcodegen && cd ios && xcodegen && open AgentConsole.xcodeproj
 name: AgentConsole
 options:
-  bundleIdPrefix: com.example          # change to your team's prefix
+  bundleIdPrefix: com.apumutyala
   deploymentTarget:
     iOS: "26.0"                         # BGContinuedProcessingTask is iOS/iPadOS 26+
 packages:
