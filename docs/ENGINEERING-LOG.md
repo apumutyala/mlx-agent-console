@@ -29,7 +29,12 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
 | `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
-| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check, 3.9 GB wired + pickable | `inkling2` | PR #11 open; compile-unverified (CI freeze) |
+| `inkling-kernels` | O2: 2/3-bit affine in Inkling's fused decode expert kernels; Metal compile check in CI | `integration` | PR #8, merged into `integration-next2` |
+| `inkling-stream` | Inkling SSD expert streaming (repack tool, slot cache, streamed tiers, worker /models) | `integration` | PR #9, merged into `integration-next2` via #10 |
+| `lfm-moe-stream` | expert streaming generalised to SwitchGLU MoEs; LFM2.5-8B-A1B streamed tiers (contains #9) | `inkling-stream` | PR #10, merged into `integration-next2` |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check, 3.9 GB wired + pickable | `inkling2` | PR #11, merged into `integration-next2` |
+| `engine-ab` | ModelStore (Application Support, offline-first), Xybrid LLM engine, engine A/B (A1–A7) | `integration` | PR #12, merged into `integration-next2` |
+| `integration-next2` | `integration` + #8 + #10 (#9) + #11 + #12, review fixes | `integration` | to fast-forward `integration` |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -145,6 +150,31 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: `integration-next2` — merged #8, #10 (with #9), #11, #12 on `integration`, review fixes
+- **Merge order:** `integration` → `inkling-kernels` (#8) → `lfm-moe-stream` (#10, brings #9) → `inkling-lamq` (#11) → `engine-ab` (#12). Every PR's behaviour is kept; the resolutions below are the decisions made.
+- **`MLXBackend` load path:** integration's unified path is unchanged (inline-in-caller load, draining, `MemoryBudget` gate, VLM routing, benchmark mode, epoch-tracked `loadLarge` with the token breadcrumb, `applyMemorySettings`). On top of it:
+  1. `performLoad`: engine-ab's `guard target.engine == .mlx` (wrongEngine), then #10's `Inkling2ExpertStreaming.options` (off unless the entry is streamed).
+  2. `case .llm where target.streamed == nil` → engine-ab's ModelStore load (`storeConfiguration(for:)` + `#hubDownloader(ModelStore.hub)`, local-first, `noteDownloaded`). `case .llm, .vlm` → `loadLarge(target, epoch:progress:)`, so streamed LFM tiers never take the plain HF `.llm` load.
+  3. `loadLarge`: streamed build → `StreamedModelStore.ensureDownloaded` then `LLMModelFactory`/`VLMModelFactory.loadContainer(from: directory)` by loader; lamq build → pinned-revision download with the `.npz` patterns, now through `#hubDownloader(ModelStore.hub)`; everything else → `VLMModelFactory` with `storeConfiguration` + `ModelStore.hub`. No `#hubDownloader()` or `#huggingFaceLoadModelContainer` is left in the app.
+  4. #8's `applyKernelOptions()` and the Inkling kernel self-check run inside `loadLarge` after the breadcrumb.
+  5. The load report stays inside `if isCurrent(loadEpoch)` and gains #10's streaming suffix; #10's unconditional `removeObject(pendingLoadKey)` is dropped (the token `defer` owns it).
+  6. `makeConversation`: greedy diagnostic temperature, then `applyMemorySettings`, then the streamed exact-prefill override. **`params.maxKVSize` is never set** (the Inkling rotating-cache bug).
+- **`ModelCatalog`:** `Entry` has the union of fields (`streamed`, `headroomGB`, `lamqRevision`, `engine`, `xybridSource`). `all` = LFM3, LFM2.5 1.2B, 350M, 8B-A1B, Qwen3 + `lfmStreamTiers` (75%, 62%) + `inklingTiers` (lamq 3.9 GB, DWQ, GPTQ small, GPTQ 3-bit, streamed 25/19/50/100%). `lamqBuilds` (3.9/4.7/5.4) stays for Settings; 4.7/5.4 stay out of `all` as #11 intends. `xybridEntries` stay out of `all` and are in `pickerEntries`.
+- **Settings:** `StreamingSection()` then `if deviceMemoryGB >= 14 { LamqSettingsSection() }`, plus engine-ab's model/engine UI.
+- **CI (`build.yml`):** worker tests run `test_jobworker test_mcp_bridge test_fleet test_models`; NumPy steps for the kernel reference, expert repack + trace sim and lamq; both Metal compile checks (`check_metal_kernels.py` and `check_lamq_metal_kernels.py`) as separate `always()` steps.
+- **`VENDORED.md`:** one list, each local patch once: 1 Package.swift, 2 patch A, 3 patch B, 4 patch C (streaming: MLXLMCommon `ExpertStreaming*.swift`, the Inkling typealias shim, Inkling2.swift, LFM2MoE.swift, Load.swift hooks), 5 patch D (lamq), then K1/K2 (kernels).
+- **`Inkling2.swift` (vendored):** lamq's split (`prepareCheckpoint` → lamq or `prepareConvertedCheckpoint`) keeps patch C's streaming branch inside `prepareConvertedCheckpoint`; `experts` is optional (lamq), so the trace path writes `mlp.experts?.stream`.
+- **Review fixes (2026-11-27b):**
+  - pr9 HIGH: expert slots install once, only for the language-model checkpoint (`expertSlotsInstalled`, and the checkpoint must hold `language_model.*` keys). The vision tower's on-demand `prepareCheckpoint` no longer reallocates slots or writes expert keys into the vision checkpoint.
+  - pr9 MED: no `fatalError` on expert I/O. `ExpertSlotCache.ensure` records a bind or read error on the runtime, releases the slots of that call's reads (a retry rereads them) and returns valid slot ids. `ExpertStreaming.takeError()` (new, public) is checked by `MLXConversation` after every step and at the end, and by `BenchmarkRunner` after its decode loop: the request fails with the I/O error, the app keeps running.
+  - pr9 LOW: `StreamedModelStore` skips the request when the `.part` already holds the whole file, discards a `.part` longer than the listing, and on HTTP 416 deletes the `.part` and retries once from byte 0. `experts.bin` is checked against `experts.json` (`file_bytes` and each layer's SHA-256 over its records) before it is renamed into place; a mismatch deletes it.
+  - pr12 LOW: fleet bench without `model_id` refuses a Xybrid chat selection (`BenchError.unknownModel`) instead of handing it to the MLX runner.
+  - pr12 LOW: `ModelStore.localSnapshot` requires `tokenizer_config.json`, and `noteDownloaded` (and the first-sight record) store every `*.json`/`*.jinja`/`*.safetensors` file of the snapshot, so a later offline load requires all of them, chat templates included. Not done: a fallback to the network when a `.directory` load fails.
+  - pr10/pr11/pr12 merge findings are the resolutions above.
+- **Also:** `BenchmarkRunner`'s own memory skip uses `residentGB` for streamed builds (it used `downloadGB`, 10.3 GB for streamed Inkling, so streamed tiers were always skipped); lamq's `headroomGB` and engine-ab's force-load are both kept there.
+- **Verified locally:** worker 68 tests OK (`test_jobworker test_mcp_bridge test_fleet test_models`); NumPy: kernel reference 9 OK, lamq 23 OK (1 skipped), expert repack + trace sim 15 OK.
+- **Not verified:** nothing has run on a device. The app is compile-checked by CI only (run in the PR / coordinator report).
 
 ### 2026-11-27: receipts round 2 (build `b74c0e2`, workload set w2, no background apps)
 Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, plugged in, thermal nominal throughout.

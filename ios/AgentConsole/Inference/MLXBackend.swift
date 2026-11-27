@@ -82,6 +82,7 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     /// Files of a LookAtMyQuant packed build: the factory's own patterns plus the packed `.npz`
     /// files, which it would not fetch (MLXVLM patch D, docs/LAMQ-FORMAT-SPEC.md).
     static let lamqDownloadPatterns = ["*.npz", "*.safetensors", "*.json", "*.jinja"]
+
     /// `configuration(for:)`, pointed at the local snapshot when ModelStore has a complete
     /// one for the repo at `refs/main` (then the downloader is never called for the
     /// weights, so the load works offline and never waits on the network). Only the model
