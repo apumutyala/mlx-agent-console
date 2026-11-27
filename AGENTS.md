@@ -6,7 +6,7 @@ Read [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) first. It covers the goa
 - Branch from `integration`, or from the base named in your task.
 - Open a PR into `integration`. Only the coordinator merges into `integration`, and only through a PR into `main`.
 - Never push to `main`, `integration`, or another agent's branch.
-- Commits are authored as Apuroop Mutyala, with no AI trailers. The repo stays private.
+- Commits are authored as Apuroop Mutyala, with no AI trailers. The repo is public (since 2026-11-27): never commit secrets or device identifiers.
 
 ## Building
 - Worker tests run locally: `cd worker && uv run --no-project --with mcp python -m unittest test_jobworker test_mcp_bridge test_fleet`.
@@ -23,10 +23,12 @@ Read [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) first. It covers the goa
   - Exactly one shared poller (`tools/ci_status.py poll`, run by the coordinator) calls GitHub once every 2 minutes and writes `~/.ci-status/mlx-agent-console.json`.
   - `wait` and `show` only read that file.
   - Call `gh run view <id> --log-failed` once, only for a failed run.
-- **CI budget rule (hard, 2026-11-27):** agents do not dispatch CI.
-  - The account has 2,000 Actions minutes a month, and macOS bills at 10× on this private repo. One night of per-agent builds used 1,829 minutes.
-  - Work compile-unverified: re-read your Swift carefully, and run Python/NumPy tests locally. Mark the PR "compile-unverified".
-  - The coordinator runs at most one batched build of the merged branch, and only when it will become an iPad build the user can install.
+- **CI rule (2026-11-27, updated):**
+  - The repo is now **public**, so GitHub Actions minutes are free. Builds are still not free in attention or API budget.
+  - An agent may run **at most 2 CI builds per PR task**: one to compile-check, and one after fixes.
+  - Always wait through `ci_status.py wait`, never with `gh run watch` or loops.
+  - Device builds for the user (IPAs) come only from the coordinator, batched from `integration`.
+  - Never commit secrets, tokens, hostnames, device serials or UDIDs. Everything in this repo, including PR text, is public.
 - Keep `SWIFT_VERSION` 5.0. `MLXArray` is not `Sendable`, so serialize inside `container.perform`.
 
 ## PR body checklist
