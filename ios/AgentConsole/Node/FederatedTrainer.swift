@@ -80,10 +80,13 @@ actor FederatedTrainer {
         }
         let initial: Data = try await c.perform { ctx in
             // Same seed on every device → identical initial lora_a everywhere.
-            MLXRandom.seed(UInt64(truncatingIfNeeded: seed))
-            _ = try LoRAContainer.from(
-                model: ctx.model,
-                configuration: LoRAConfiguration(numLayers: layers, loraParameters: .init(rank: rank)))
+            // A scoped RandomState (rather than seeding the global one) means
+            // nothing else drawing random keys can shift the sequence.
+            try withRandomState(MLXRandom.RandomState(seed: UInt64(truncatingIfNeeded: seed))) {
+                _ = try LoRAContainer.from(
+                    model: ctx.model,
+                    configuration: LoRAConfiguration(numLayers: layers, loraParameters: .init(rank: rank)))
+            }
             eval(ctx.model)
             // Some models cache fused views of their weights; rebuild after any
             // weight change (mlx-swift-lm does the same after loading adapters).
