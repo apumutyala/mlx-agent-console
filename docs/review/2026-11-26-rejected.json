@@ -1,0 +1,32 @@
+[
+ {
+  "dimension": "protocol",
+  "title": "The round fan-out ignores the model each node reports, so nodes running another model get the task and always fail.",
+  "file": "worker/federated.py",
+  "upheld": 1
+ },
+ {
+  "dimension": "security",
+  "title": "Fleet nodes share the single admin WORKER_TOKEN, and node identity is whatever node_id the request body claims, so any device can impersonate others and approve human-gated jobs",
+  "file": "worker/fleet.py",
+  "upheld": 0
+ },
+ {
+  "dimension": "security",
+  "title": "FedAvg trusts the example count each node reports and never checks adapter contents, so one node can publish a NaN, attacker-chosen or corrupt global adapter",
+  "file": "worker/federated.py",
+  "upheld": 1
+ },
+ {
+  "dimension": "security",
+  "title": "MCP tools return node-controlled text without the untrusted-output note, and node metrics strings have no length limit",
+  "file": "worker/mcp_bridge.py",
+  "upheld": 0
+ },
+ {
+  "dimension": "security",
+  "title": "The node registry has no cap, so a single broadcast_prompt can fan out to unlimited fake nodes while every heartbeat rewrites the whole registry under the fleet lock",
+  "file": "worker/fleet.py",
+  "upheld": 0
+ }
+]

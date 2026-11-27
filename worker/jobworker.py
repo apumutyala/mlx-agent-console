@@ -382,6 +382,7 @@ def make_handler(worker: Worker, token: str, router=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "jobworker/1"
+        timeout = 90  # idle socket timeout; longer than the 30 s long-poll cap
 
         def log_message(self, fmt, *args):  # quiet; jobs have their own logs
             if os.environ.get("WORKER_ACCESS_LOG"):
@@ -404,18 +405,18 @@ def make_handler(worker: Worker, token: str, router=None):
 
         def _body(self) -> dict:
             n = int(self.headers.get("Content-Length") or 0)
-            if n > 1_000_000:
-                raise ValueError("body too large")
+            if n < 0 or n > 1_000_000:
+                raise ValueError("bad or too large Content-Length")
             raw = self.rfile.read(n) if n else b"{}"
             body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
             return body
 
-        def _raw(self, limit: int = 300 * 1024 * 1024) -> bytes:
+        def _raw(self, limit: int = 64 * 1024 * 1024) -> bytes:
             n = int(self.headers.get("Content-Length") or 0)
-            if n > limit:
-                raise ValueError("body too large")
+            if n < 0 or n > limit:
+                raise ValueError("bad or too large Content-Length")
             return self.rfile.read(n) if n else b""
 
         def _send_file(self, path: Path) -> None:
@@ -440,6 +441,9 @@ def make_handler(worker: Worker, token: str, router=None):
             if out is None:
                 return False
             status, body = out
+            if method == "PUT" and status >= 400:
+                # The upload body may be unread; don't reuse this connection.
+                self.close_connection = True
             if isinstance(body, Path):
                 self._send_file(body)
             else:

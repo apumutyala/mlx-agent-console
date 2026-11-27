@@ -23,7 +23,7 @@ import uuid
 from array import array
 from pathlib import Path
 
-from fleet import TASK_TERMINAL, Fleet, handle as fleet_handle
+from fleet import MAX_PAYLOAD, TASK_TERMINAL, Fleet, handle as fleet_handle
 from jobworker import now
 from receipts import ReceiptStore, handle as receipts_handle
 
@@ -48,7 +48,7 @@ def read_safetensors(path: Path) -> tuple[dict[str, tuple[list[int], array]], di
         if dt == "F32":
             vals = array("f", buf)
         elif dt == "F16":
-            vals = array("f", struct.unpack(f"<{len(buf) // 2}e", buf))
+            vals = array("f", memoryview(buf).cast("e"))  # no per-element tuple (≈20x less RAM)
         elif dt == "BF16":
             halves = array("H", buf)
             vals = array("f", array("I", (h << 16 for h in halves)).tobytes())
@@ -129,8 +129,9 @@ class Federation:
         tmp.write_text(json.dumps(r, indent=2), encoding="utf-8")
         tmp.replace(d / "round.json")
 
-    def latest(self) -> dict | None:
-        done = [r for r in self.rounds.values() if r["status"] == "aggregated"]
+    def latest(self, base_model: str | None = None) -> dict | None:
+        done = [r for r in self.rounds.values() if r["status"] == "aggregated"
+                and (base_model is None or r["base_model"].lower() == base_model.lower())]
         return max(done, key=lambda r: r["finished_at"]) if done else None
 
     def get(self, rid: str) -> dict:
@@ -145,18 +146,37 @@ class Federation:
         return self.root / rid / ADAPTER
 
     def start(self, spec: dict) -> dict:
+        """Validate everything first, then save the round, then dispatch. If dispatch
+        fails partway, the tasks already created are cancelled and the round is failed."""
         base_model = spec.get("base_model")
         if not isinstance(base_model, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{3,128}", base_model):
             raise ValueError("base_model must be a Hugging Face repo id")
         nodes = spec.get("nodes") or self.fleet.online_nodes("train_lora")
         if not isinstance(nodes, list) or not nodes:
-            raise ValueError("no online nodes can train (capability train_lora)")
+            raise ValueError("no online nodes can train (a device must enable 'Accept training tasks')")
+        if len(nodes) > 64 or len(set(map(str, nodes))) != len(nodes):
+            raise ValueError("nodes must be at most 64 unique ids")
         for n in nodes:
-            if n not in self.fleet.nodes:
+            node = self.fleet.nodes.get(n) if isinstance(n, str) else None
+            if node is None:
                 raise LookupError(f"no such node: {n}")
+            if "train_lora" not in node.get("capabilities", {}).get("kinds", []):
+                raise ValueError(f"node {n} does not accept training tasks")
+
+        parent = spec.get("parent_round")
+        if parent == "latest":
+            latest = self.latest(base_model)
+            parent = latest["id"] if latest else None
+        parent_hp = {}
+        if parent:
+            pr = self.get(parent)
+            if pr["base_model"].lower() != base_model.lower():
+                raise ValueError("parent round used a different base model")
+            self.adapter_path(parent)
+            parent_hp = pr["hyperparameters"]
 
         def num(key, default, lo, hi, cast):
-            v = spec.get(key, default)
+            v = spec.get(key, parent_hp.get(key, default))
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
                 raise ValueError(f"{key} must be in [{lo}, {hi}]")
             return cast(v)
@@ -166,41 +186,78 @@ class Federation:
               "rank": num("rank", 8, 1, 64, int),
               "layers": num("layers", 8, 1, 64, int),
               "batch_size": num("batch_size", 1, 1, 16, int)}
+        if parent and (hp["rank"], hp["layers"]) != (parent_hp.get("rank"), parent_hp.get("layers")):
+            raise ValueError("rank and layers must match the parent round's adapter")
+        deadline_s = num("deadline_seconds", 3600, 60, 86400, int)
+
         examples = spec.get("examples") or []
-        if not isinstance(examples, list) or not all(isinstance(e, dict) for e in examples):
-            raise ValueError("examples must be a list of objects")
-        use_local = bool(spec.get("use_local_data", not examples))
-        parent = spec.get("parent_round")
-        if parent == "latest":
-            latest = self.latest()
-            parent = latest["id"] if latest and latest["base_model"] == base_model else None
-        if parent:
-            if self.get(parent)["base_model"] != base_model:
-                raise ValueError("parent round used a different base model")
-            self.adapter_path(parent)
+        if not isinstance(examples, list) or len(examples) > 2000:
+            raise ValueError("examples must be a list of at most 2000 objects")
+        for e in examples:
+            if (not isinstance(e, dict) or set(e) - {"text", "prompt", "completion"}
+                    or not all(isinstance(v, str) and len(v) <= 8000 for v in e.values())):
+                raise ValueError("each example is {text} or {prompt, completion} with strings up to 8000 chars")
+            if not (e.get("text") or (e.get("prompt") and e.get("completion"))):
+                raise ValueError("each example needs text, or both prompt and completion")
+        # Training on a device's private documents is opt-in twice: here, and on the device.
+        use_local = spec.get("use_local_data", False) is True
+        if not use_local and len(examples) < 2 * len(nodes):
+            raise ValueError(f"need at least 2 examples per node ({2 * len(nodes)}), "
+                             "or use_local_data=true (each device must also allow it)")
+        seed = spec.get("seed", 1234)
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+            raise ValueError("seed must be a non-negative integer")
 
         rid = "r" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
+        payloads = []
+        for i, node in enumerate(nodes):
+            payload = {"round_id": rid, "base_model": base_model, **hp, "examples": examples[i::len(nodes)],
+                       "seed": seed, "use_local_data": use_local,
+                       "init_adapter": f"fed/rounds/{parent}/adapter" if parent else None}
+            if len(json.dumps(payload)) > MAX_PAYLOAD:
+                raise ValueError("examples too large for one task; send fewer or shorter examples")
+            payloads.append((node, payload))
+
         r = {"id": rid, "status": "running", "base_model": base_model, "hyperparameters": hp,
              "use_local_data": use_local, "parent_round": parent, "created_at": now(),
-             "finished_at": None, "tasks": {}, "result": None,
-             "seed": int(spec.get("seed", 1234)) if not isinstance(spec.get("seed"), bool) else 1234}
+             "deadline_at": now() + deadline_s, "finished_at": None, "tasks": {}, "result": None,
+             "seed": seed}
         with self.lock:
             self.rounds[rid] = r
-            for i, node in enumerate(nodes):
-                shard = examples[i::len(nodes)]
-                payload = {"round_id": rid, "base_model": base_model, **hp, "examples": shard,
-                           "seed": r["seed"],
-                           "use_local_data": use_local,
-                           "init_adapter": f"fed/rounds/{parent}/adapter" if parent else None}
-                task = self.fleet.create_task("train_lora", payload, node=node, round_id=rid)
-                r["tasks"][task.id] = node
+            self._save(r)
+            try:
+                for node, payload in payloads:
+                    task = self.fleet.create_task("train_lora", payload, node=node, round_id=rid)
+                    r["tasks"][task.id] = node
+            except Exception as e:
+                for tid in r["tasks"]:
+                    t = self.fleet.tasks.get(tid)
+                    if t is not None:
+                        self.fleet._finish(t, "cancelled", reason="round dispatch failed")
+                r.update(status="failed", result={"error": f"dispatch failed: {e}"}, finished_at=now())
+                self._save(r)
+                raise
             self._save(r)
         return r
+
+    def expire(self) -> None:
+        """Past a round's deadline, stop waiting: cancel unfinished tasks and
+        average whatever succeeded (a node that vanished can't stall a round)."""
+        for rid, r in list(self.rounds.items()):
+            if r["status"] != "running" or now() < r.get("deadline_at", float("inf")):
+                continue
+            for tid in r["tasks"]:
+                t = self.fleet.tasks.get(tid)
+                if t is not None:
+                    self.fleet._finish(t, "cancelled", reason="round deadline passed")
+            self._maybe_aggregate(rid)
 
     def _on_task_done(self, meta: dict) -> None:
         rid = meta.get("round_id")
         if rid and rid in self.rounds:
-            self._maybe_aggregate(rid)
+            # Averaging can take seconds; don't hold the node's /complete request.
+            threading.Thread(target=self._maybe_aggregate, args=(rid,), daemon=True,
+                             name=f"fedavg-{rid}").start()
 
     def _maybe_aggregate(self, rid: str) -> None:
         with self.lock:
@@ -252,7 +309,8 @@ def make_router(data_dir: Path, offline_after: float = 75.0):
                     if method == "POST":
                         return 201, fed.start(read_json())
                 if parts == ["fed", "latest"] and method == "GET":
-                    return 200, {"round": fed.latest()}
+                    bm = (query.get("base_model") or [None])[0]
+                    return 200, {"round": fed.latest(bm)}
                 if len(parts) == 3 and parts[1] == "rounds" and method == "GET":
                     return 200, fed.get(parts[2])
                 if len(parts) == 4 and parts[1] == "rounds" and parts[3] == "adapter" and method == "GET":
@@ -269,6 +327,7 @@ def make_router(data_dir: Path, offline_after: float = 75.0):
             time.sleep(max(offline_after / 5, 0.2))
             try:
                 fleet.sweep()
+                fed.expire()
             except Exception:
                 pass
     threading.Thread(target=sweeper, daemon=True, name="fleet-sweeper").start()

@@ -203,6 +203,50 @@ def _clip_lines(lines: list[str], budget: int = MAX_TEXT) -> tuple[list[str], bo
     return list(reversed(out)), False
 
 
+def validate(value, schema: dict, path: str = "arguments") -> None:
+    """Enforce the JSON-Schema subset our tool schemas use: type, properties,
+    required, additionalProperties: false, items, enum, pattern, min/maxLength,
+    maxItems, minimum/maximum. Raises ValueError naming the offending path."""
+    import re
+    t = schema.get("type")
+    checks = {"object": lambda v: isinstance(v, dict),
+              "array": lambda v: isinstance(v, list),
+              "string": lambda v: isinstance(v, str),
+              "boolean": lambda v: isinstance(v, bool),
+              "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+              "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)}
+    if t and not checks[t](value):
+        raise ValueError(f"{path} must be {t}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
+    if t == "string":
+        if len(value) > schema.get("maxLength", 10**9) or len(value) < schema.get("minLength", 0):
+            raise ValueError(f"{path} has the wrong length")
+        if "pattern" in schema and not re.fullmatch(schema["pattern"].lstrip("^").rstrip("$"), value):
+            raise ValueError(f"{path} has an invalid format")
+    if t in ("integer", "number"):
+        if value < schema.get("minimum", float("-inf")) or value > schema.get("maximum", float("inf")):
+            raise ValueError(f"{path} is out of range")
+    if t == "array":
+        if len(value) > schema.get("maxItems", 10**9):
+            raise ValueError(f"{path} has too many items")
+        for i, item in enumerate(value):
+            validate(item, schema.get("items", {}), f"{path}[{i}]")
+    if t == "object":
+        props = schema.get("properties", {})
+        extra_schema = schema.get("additionalProperties", True)
+        for req in schema.get("required", []):
+            if req not in value:
+                raise ValueError(f"missing argument: {req}" if path == "arguments" else f"{path}.{req} is required")
+        for k, v in value.items():
+            if k in props:
+                validate(v, props[k], f"{path}.{k}" if path != "arguments" else k)
+            elif extra_schema is False:
+                raise ValueError(f"unexpected arguments: {[k]}" if path == "arguments" else f"{path}.{k} is not allowed")
+            elif isinstance(extra_schema, dict):
+                validate(v, extra_schema, f"{path}.{k}")
+
+
 class Tools:
     def __init__(self, api: WorkerAPI, allow_approve: bool):
         self.api = api
@@ -312,7 +356,10 @@ class Tools:
                  "learning_rate": {"type": "number", "minimum": 1e-7, "maximum": 0.1, "default": 1e-4},
                  "rank": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8},
                  "layers": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8},
-                 "use_local_data": {"type": "boolean"},
+                 "use_local_data": {"type": "boolean", "description": (
+                     "Train on each device's private imported documents. Only set this when the user "
+                     "explicitly asked for it in this conversation; each device must also allow it.")},
+                 "deadline_seconds": {"type": "integer", "minimum": 60, "maximum": 86400, "default": 3600},
                  "parent_round": {"type": "string", "maxLength": 64},
                  "examples": {"type": "array", "maxItems": 2000, "items": {
                      "type": "object", "properties": {"text": {"type": "string", "maxLength": 8000},
@@ -364,12 +411,7 @@ class Tools:
         schema = next((d["inputSchema"] for d in self.definitions() if d["name"] == name), None)
         if schema is None:
             raise LookupError(f"unknown tool: {name}")
-        extra = set(args) - set(schema["properties"])
-        if extra:
-            raise ValueError(f"unexpected arguments: {sorted(extra)}")
-        for req in schema.get("required", []):
-            if req not in args:
-                raise ValueError(f"missing argument: {req}")
+        validate(args, schema)   # enforce the declared schema, not just the top-level keys
         return getattr(self, "t_" + name)(**args)
 
     @staticmethod
