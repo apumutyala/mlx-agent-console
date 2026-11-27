@@ -49,6 +49,7 @@ struct SettingsView: View {
                 }
                 MemorySettingsSection(memory: AppModel.shared.memory)
                 MemorySection(ignoreMemoryCheck: $ignoreMemoryCheck)
+                if ModelCatalog.deviceMemoryGB >= 14 { LamqSettingsSection() }
             }
             .navigationTitle("Settings")
             .sheet(isPresented: $scanning) {

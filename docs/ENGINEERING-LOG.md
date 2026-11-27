@@ -27,6 +27,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `xybrid-speech` | Xybrid Whisper STT + Kokoro TTS | `fleet` | merged into `integration` (CI green 45948595221) |
 | `inkling2` | Inkling 2 Mini via vendored mlx-swift-lm PR #821 + Fix A | `integration` | PR open, CI pending |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check | `inkling2` | PR open; Metal compile-unverified (CI freeze) |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -138,6 +139,19 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, depends on `inkling2`)
+- **Spec:** `docs/LAMQ-FORMAT-SPEC.md` covers trellis `ht*`/`rtr*` (12-bit sliding state over a reversed little-endian row bitstream, ht = Fibonacci hash into 512/1024-entry f16 LUTs), Lloyd-Max `lm6`/`lm8`, NVFP4, Kronecker Sylvester×Paley RHT with f16 "signs", 128-row-group expert maps, bucketed embed/head, and steering tensors.
+  - NVFP4 passthrough ("23/192 hot buckets") is only in the 8.9/11.2 GB builds. The 3.9/4.7/5.4 GB builds are pure trellis + Lloyd-Max.
+- **Verified:** our NumPy decoder (`ios/tools/lamq/lamq_ref.py`) == LookAtMyQuant's own torch decoders (CPU), **bit-identical on 532 tensors**: 5.4 GB layers 0 and 7, every linear and all 256 expert sides each, plus 8 embed buckets. Digests are in `lamq_digests.json`. 19 NumPy tests pass, including the Metal index-math emulation.
+- **Written, compile-unverified (CI freeze):**
+  - MLXFast kernels: fused trellis/LM matvec for decode, f16 dequant tiles for prefill.
+  - STORED-npz `pread` loader, packed linear/expert/embed/head classes.
+  - On-device self-check: Settings › Inkling 2 Mini · LookAtMyQuant downloads layer 7 (~190 MB) and compares SHA-256 digests.
+  - CI steps: the NumPy tests, and `check_lamq_metal_kernels.py --compile` (156 instantiations).
+- **Not done:** wiring into `Inkling2.swift`. Steering uses HF transformers names, not PR #821's layout, so a name/reparametrisation map is needed. The lamq tiers are therefore listed in Settings with memory plans but are not pickable.
+- **Memory (estimates):** 3.9 GB build fits resident (~4.7 GB at 4K). 4.7 GB needs ~0.6 GB streamed and 5.4 GB ~1.3 GB, via the PR #9 slot cache with per-format slab records (to agree with PR #9).
+- **Licences:** the lamq runtime is MIT (no code copied; notice kept). The weights declare no licence; the base model is Apache-2.0. Weights are downloaded on device only, never redistributed.
 
 ### 2026-11-27
 - **Inkling 2 (`inkling2` → PR into `integration`):** vendored aleroot/mlx-swift-lm@5507b3b (PR #821) under `ios/Vendor/mlx-swift-lm` without tests; Fix A (per-layer quantization keys renamed with the `model.` strip) and a DSpark-namespace exclusion. Fix B (mlx-vlm layout remap) deferred: that layout renames/reparametrizes ~30 tensors per layer (`q_scale`/`rel_scale`/`rel_proj`, `controllers.*`, `message_queries`) and LayerFit-2bit mixes gate 3-bit with up 2-bit, so gate/up can't be fused losslessly into `gate_up_proj`; not verifiable without weights.

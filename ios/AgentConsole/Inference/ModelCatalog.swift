@@ -102,6 +102,55 @@ enum ModelCatalog {
 
     static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3]
 
+    // MARK: Inkling 2 Mini, LookAtMyQuant trellis builds (docs/LAMQ-FORMAT-SPEC.md)
+    //
+    // Not chat-loadable yet: the packed kernels and loader exist (MLXVLM InklingLamq*.swift) but are
+    // not wired into the Inkling 2 forward pass. Listed for the Settings self-check and the memory
+    // plan only, never in `all`, so the picker can't select one.
+
+    struct LamqBuild: Identifiable, Hashable, Sendable {
+        enum Plan: Hashable, Sendable {
+            /// Everything resident, with this context budget.
+            case resident(contextTokens: Int)
+            /// Experts beyond the budget stream from the downloaded files (PR #9 slot cache; not built).
+            case streamed(streamGB: Double)
+        }
+        let id: String
+        let name: String
+        let repo: String
+        /// Hugging Face revision the spec, digests and sizes were taken from.
+        let revision: String
+        /// All files (weights + steering + tokenizer), GB, from the HF tree API.
+        let totalGB: Double
+        let plan: Plan
+        /// Card results (greedy, `max_new_tokens` 1,536, no thinking cap): GSM8K 200 / HumanEval 164.
+        let card: String
+
+        /// Beyond the weights: KV (~0.3 GB at 4K, 0.42 at 8K), prefill tiles (~0.2), runtime/app
+        /// (~0.3-0.4). Estimate, not measured (spec §10).
+        static let overheadGB = 0.9
+
+        var residentNeedGB: Double { totalGB + Self.overheadGB }
+    }
+
+    static let lamq39 = LamqBuild(
+        id: "inkling2-mini-lamq-3.9", name: "Inkling 2 Mini · LookAtMyQuant 1.18 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-3.9GB",
+        revision: "fbee46a43565d8efac84e89edc196add5f28b254", totalGB: 3.85,
+        plan: .resident(contextTokens: 4096), card: "GSM8K 86.5% · HumanEval 59.2% (BF16: 94.0 / 89.6)")
+    static let lamq47 = LamqBuild(
+        id: "inkling2-mini-lamq-4.7", name: "Inkling 2 Mini · LookAtMyQuant 1.45 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-4.7GB",
+        revision: "d865ec500e2e88da2240ef41a15eb892cb3f1a2f", totalGB: 4.72,
+        plan: .streamed(streamGB: 0.6), card: "GSM8K 90.5% · HumanEval 67.1%")
+    static let lamq54 = LamqBuild(
+        id: "inkling2-mini-lamq-5.4", name: "Inkling 2 Mini · LookAtMyQuant 1.65 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-5.4GB",
+        revision: "d470c9c15fdccf7380c401c7fd72e291d92c6b0d", totalGB: 5.38,
+        plan: .streamed(streamGB: 1.3), card: "GSM8K 92.5% · HumanEval 76.8%")
+
+    static let lamqBuilds: [LamqBuild] = [lamq39, lamq47, lamq54]
+
     static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
     static let defaultEntry = lfm3_1_7b
 
