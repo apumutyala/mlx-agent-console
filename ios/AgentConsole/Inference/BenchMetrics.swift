@@ -5,7 +5,7 @@ import Foundation
 /// with `BenchMetricsRegistry.collect()` before and after a run, without either side importing the
 /// other. Keys are flat and unit-suffixed (`hit_rate`, `bytes_read`, `read_s`).
 protocol BenchMetricsSource: AnyObject {
-    /// Prefix for this source's keys in `collect()`, e.g. `inkling_stream`.
+    /// Prefix for this source's keys in `collect()`, e.g. `expert_stream`.
     var benchMetricsName: String { get }
     /// Current cumulative values. Empty when there is nothing to report (e.g. no model loaded).
     func benchMetrics() -> [String: Double]

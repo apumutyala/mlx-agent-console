@@ -110,19 +110,25 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
                 model: target.displayName, neededBytes: needed, budgetBytes: budget)
         }
 
+        // Read by the MoE loaders (Inkling 2, LFM2 MoE) once per load: off unless streamed.
+        Inkling2ExpertStreaming.options = Inkling2ExpertStreamingOptions(
+            enabled: target.streamed != nil,
+            residentFraction: target.streamed?.residentFraction ?? 1,
+            traceURL: StreamingDiagnostics.traceEnabled ? StreamingDiagnostics.traceURL : nil)
+
         switch target.loader {
-        case .llm:
+        case .llm where target.streamed == nil:
             return try await #huggingFaceLoadModelContainer(
                 configuration: Self.configuration(for: target),
                 progress: .download { p in progress(p.fractionCompleted) }
             )
-        case .vlm:
+        case .llm, .vlm:
             return try await loadLarge(target, progress: progress)
         }
     }
 
-    /// Inkling 2 and other big VLM-factory models: memory limits, a breadcrumb for loads the
-    /// system kills, and a load report for Settings.
+    /// Inkling 2, other big VLM-factory models and every streamed build: memory limits, a
+    /// breadcrumb for loads the system kills, and a load report for Settings.
     private func loadLarge(_ target: ModelCatalog.Entry, progress: @escaping @Sendable (Double) -> Void)
         async throws -> ModelContainer
     {
@@ -133,11 +139,6 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         if let build = target.streamed {
             streamedDirectory = try await StreamedModelStore.ensureDownloaded(build) { p in progress(0.9 * p) }
         }
-        // Read by the Inkling loader once per load: off for every non-streamed load.
-        Inkling2ExpertStreaming.options = Inkling2ExpertStreamingOptions(
-            enabled: target.streamed != nil,
-            residentFraction: target.streamed?.residentFraction ?? 1,
-            traceURL: StreamingDiagnostics.traceEnabled ? StreamingDiagnostics.traceURL : nil)
         let availableBefore = MemoryBudget.availableBytes
         if availableBefore > 0 {
             // A soft cap: past it MLX waits for in-flight work before allocating more, which
@@ -156,10 +157,15 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
             weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) })
         let loaded: ModelContainer
         if let streamedDirectory {
-            loaded = try await VLMModelFactory.shared.loadContainer(
-                from: streamedDirectory,
-                using: #huggingFaceTokenizerLoader(),
-                progress: LoadProgressHandlers(weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) }))
+            let weightsProgress = LoadProgressHandlers(weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) })
+            switch target.loader {
+            case .llm:
+                loaded = try await LLMModelFactory.shared.loadContainer(
+                    from: streamedDirectory, using: #huggingFaceTokenizerLoader(), progress: weightsProgress)
+            case .vlm:
+                loaded = try await VLMModelFactory.shared.loadContainer(
+                    from: streamedDirectory, using: #huggingFaceTokenizerLoader(), progress: weightsProgress)
+            }
         } else {
             loaded = try await VLMModelFactory.shared.loadContainer(
                 from: #hubDownloader(),
@@ -277,7 +283,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
 final class InklingStreamingMetrics: BenchMetricsSource, @unchecked Sendable {
     static let shared = InklingStreamingMetrics()
 
-    var benchMetricsName: String { "inkling_stream" }
+    var benchMetricsName: String { "expert_stream" }
 
     func benchMetrics() -> [String: Double] {
         guard let s = Inkling2ExpertStreaming.snapshot() else { return [:] }

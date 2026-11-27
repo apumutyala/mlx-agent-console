@@ -157,7 +157,7 @@ private struct StreamingSection: View {
 
     static func rows() -> [(String, String)] {
         let m = BenchMetricsRegistry.collect()
-        func v(_ key: String) -> Double? { m["inkling_stream.\(key)"] }
+        func v(_ key: String) -> Double? { m["expert_stream.\(key)"] }
         guard let calls = v("moe_calls") else { return [("Counters", "no Inkling load yet")] }
         var rows: [(String, String)] = [
             ("Mode", v("streaming") == 1
@@ -191,7 +191,7 @@ private struct StreamingSection: View {
             if FileManager.default.fileExists(atPath: StreamingDiagnostics.traceURL.path) {
                 ShareLink("Share routing trace", item: StreamingDiagnostics.traceURL).font(.caption)
             }
-        } header: { Text("Inkling expert streaming") } footer: {
+        } header: { Text("MoE expert streaming (Inkling, LFM 8B)") } footer: {
             Text("Streamed tiers keep part of the experts in memory and read the rest from storage. They download "
                  + "once from your worker's models directory (see docs/INKLING-EXPERT-STREAMING.md). The trace "
                  + "takes effect on the next Inkling load and writes the routed experts of every layer call.")

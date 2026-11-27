@@ -180,7 +180,41 @@ enum ModelCatalog {
                                         inkling2MiniStream25, inkling2MiniStream19, inkling2MiniStream50,
                                         inkling2MiniStream100]
 
-    static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
+    // MARK: LFM2.5-8B-A1B, SSD expert streaming
+    //
+    // `LiquidAI/LFM2.5-8B-A1B-MLX-4bit` @ 2e92b640, repacked by tools/expert_repack.py (switch_glu
+    // layout). From its header: 22 MoE layers × 32 experts of 6.19 MB (4-bit, group 64) = 4.360 GB of
+    // experts, 0.474 GB everything else. One slot across the 22 layers costs 136.25 MB. Footprint ≈
+    // core + S × 136 MB + KV (hybrid: 6 attention layers, ~0.1 GB at 8K) + ~0.3 GB prefill scratch at
+    // 256-token steps + ~0.2 GB runtime: S = 20 ≈ 3.8 GB, S = 24 ≈ 4.3 GB (the 4.6 GB target).
+
+    static let lfm8bStreamName = "LFM2.5-8B-A1B-MLX-4bit-stream"
+    static let lfm8bCoreGB = 0.474
+    static let lfm8bExpertsGB = 4.360
+
+    static func lfm8bStreamed(id: String, name: String, fraction: Double, note: String) -> Entry {
+        var e = Entry(
+            id: id, displayName: name, repo: "LiquidAI/LFM2.5-8B-A1B-MLX-4bit", downloadGB: 4.85, note: note,
+            minimumMemoryGB: 7, thinks: true, temperature: 0.2, loader: .llm,
+            residentGB: lfm8bCoreGB + fraction * lfm8bExpertsGB, contextTokens: 8192, prefillStepSize: 256)
+        e.streamed = StreamedBuild(name: lfm8bStreamName, residentFraction: fraction)
+        return e
+    }
+
+    /// 24 of 32 experts per layer resident (3.74 GB weights).
+    static let lfm25_8b_a1b_stream75 = lfm8bStreamed(
+        id: "lfm2.5-8b-a1b-stream75", name: "LFM2.5 8B-A1B (MoE) · streamed 75%", fraction: 0.75,
+        note: "The 8B MoE with three quarters of its experts in memory and the rest read from storage. "
+            + "Fits the default per-app memory limit; experimental.")
+    /// 20 of 32 (3.20 GB weights): more headroom, more misses.
+    static let lfm25_8b_a1b_stream62 = lfm8bStreamed(
+        id: "lfm2.5-8b-a1b-stream62", name: "LFM2.5 8B-A1B (MoE) · streamed 62%", fraction: 0.625,
+        note: "Like the 75% tier with fewer experts in memory: ~0.5 GB smaller, slower.")
+
+    static let lfmStreamTiers: [Entry] = [lfm25_8b_a1b_stream75, lfm25_8b_a1b_stream62]
+
+    static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b]
+        + lfmStreamTiers + inklingTiers
     static let defaultEntry = lfm3_1_7b
 
     /// Entries this device can run, in display order.

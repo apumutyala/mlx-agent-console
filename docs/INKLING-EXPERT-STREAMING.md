@@ -205,3 +205,30 @@ about 8 experts × 6.19 MB × 22 ≈ 1.1 GB, or ~0.27 s per step.
 - **Syncs per token.** Every MoE call syncs the host to read its routes: 48 syncs per decoded token.
   The skip applies only when `S == 128`, every expert is resident and no trace is on.
 - **No prefetch or read overlap yet.** Prefetch and overlap are design stages M4 and M5.
+
+## LFM2.5-8B-A1B (same mechanism, branch `lfm-moe-stream`)
+
+The streaming core is model-agnostic (`MLXLMCommon/ExpertStreaming.swift`). A model plugs in with
+a small adapter:
+
+- `installStreamedSwitchGLU` builds slot-sized `switch_mlp` tensors for any `SwitchGLU` MoE.
+  `LFM2MoE.swift` calls it from `prepareCheckpoint` and implements `CheckpointLoadingHooks`.
+- `tools/expert_repack.py` detects the `switch_glu` layout itself.
+
+| Tier | Slots per layer | Experts resident | Weights | Est. footprint |
+|---|---|---|---|---|
+| `lfm2.5-8b-a1b-stream75` | 24 / 32 | 3.27 GB | 3.74 GB | ~4.3 GB |
+| `lfm2.5-8b-a1b-stream62` | 20 / 32 | 2.72 GB | 3.20 GB | ~3.8 GB |
+
+The source is `LiquidAI/LFM2.5-8B-A1B-MLX-4bit` @ `2e92b640a63d47ad4dcf81a19a366b902356b3bc`:
+22 MoE layers × 32 experts × 6.19 MB (4-bit, group 64), so the experts take 4.360 GB and the rest
+0.474 GB. One slot across the 22 layers costs 136.25 MB.
+
+```powershell
+hf download LiquidAI/LFM2.5-8B-A1B-MLX-4bit --revision 2e92b640a63d47ad4dcf81a19a366b902356b3bc --local-dir D:\models-src\LFM2.5-8B-A1B-MLX-4bit
+python tools\expert_repack.py D:\models-src\LFM2.5-8B-A1B-MLX-4bit D:\models\LFM2.5-8B-A1B-MLX-4bit-stream --verify all
+```
+
+The gate is the same as gate (a) above: *Greedy decoding* and *Exact prefill* on (3 × 4 = 12
+experts per call), then `stream62` vs `stream75` must match token for token. Gate (b) is against
+mlx-lm on the same weights.
