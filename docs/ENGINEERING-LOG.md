@@ -108,6 +108,16 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
   - Tiers (PR layout only): `LocallyInferred/Inkling-2-Mini-MLX-3.1bpw-DWQ` 9.60 GB text weights (default), `roman220220/...-gptq-mlx-jang-small` 10.45 GB, `roman220220/...-gptq-mlx-jang` 12.49 GB. Sizes from safetensors headers, vision excluded.
   - Runtime gate: needs weights + 1.5 GiB ≤ `os_proc_available_memory()` + MLX-held bytes; Settings shows the readout, a load report and a killed-load breadcrumb. Compiled only; nothing ran on the iPad.
 
+### 2026-11-26 (later): goal set, slots filled
+- **Goal:** the user set the standing goal, which is recorded in the Goal section.
+- **Agent slots (5):**
+  1. adversarial review workflow (fleet / ios-node / xybrid);
+  2. `inkling2`;
+  3. `memory-harness`;
+  4. `bench`: on-device profiler and receipts (O1). Receipts are uploaded to the worker, readable by the MCP tool `list_receipts`, and runnable as a fleet `bench` task;
+  5. design research for Inkling expert streaming (O3), read-only.
+- **Process:** [PR #1](https://github.com/apumutyala/mlx-agent-console/pull/1) is open, `integration` → `main`. Agents open PRs into `integration`. The coordinator reviews and merges.
+
 ### 2026-11-26
 - **Fleet (worker):** added `fleet.py` (pull-based nodes, streaming tasks, artifacts, requeue) and `federated.py` (FedAvg over safetensors), plus 7 MCP fleet tools. 40 worker tests pass. The worker is reachable on the tailnet only, at `:8443`.
 - **Integration branch:** merged `liquid-models`, `ios-node` and `xybrid-speech`; CI green (run 45950481109).
