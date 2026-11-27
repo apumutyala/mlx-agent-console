@@ -123,13 +123,15 @@ struct BenchView: View {
                 .disabled(!coordinator.canRunEngineAB || abSteps.isEmpty)
             }
         } header: { Text("Engine A/B: MLX vs Xybrid") } footer: {
-            Text("Same prompt (\(EngineAB.workloadID)), greedy, 256 tokens, \(EngineAB.repetitions) reps, median. "
+            Text(Self.engineABFooter)
+        }
+    }
+
+    private static let engineABFooter: String = "Same prompt (\(EngineAB.workloadID)), greedy, 256 tokens, \(EngineAB.repetitions) reps, median. "
                  + "The first run downloads what is missing (up to ~23 GB for all steps: 5 GGUFs + 2 MLX models) into Application Support; "
                  + "keep the app in the foreground and plugged in. A6 and A5 may be killed by iOS: that is the "
                  + "data point, and the next launch saves a “killed” receipt. A7 needs its own launch: turn on "
-                 + "the residency switch, quit the app from the app switcher, reopen, select only A7 and run.")
-        }
-    }
+                 + "the residency switch, quit the app from the app switcher, reopen, select only A7 and run."
 
     /// "A2 · Xybrid · LFM2.5 8B-A1B · UD-Q3_K_XL · <date>" (engine/step only when recorded).
     static func rowTitle(_ r: BenchReceipt) -> String {

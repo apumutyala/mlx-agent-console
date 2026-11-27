@@ -497,7 +497,7 @@ final class NodeService {
         let p = try FleetClient.decodeTask(data, payload: BenchPayload.self).payload
         let entry: ModelCatalog.Entry
         if let id = p.modelId {
-            guard let e = ModelCatalog.entry(id: id) else {
+            guard let e = ModelCatalog.entry(id: id), e.engine == .mlx else {   // fleet bench = MLX runner
                 throw BenchError.unknownModel(id, known: ModelCatalog.all.map(\.id))
             }
             entry = e

@@ -62,6 +62,9 @@ final class XybridLLMBackend: @unchecked Sendable {
     private let lock = NSLock()
     private var loadedEntry: ModelCatalog.Entry?
     private var model: XybridModel?
+    /// Models `forget()` dropped while a conversation may still use them; `unload()` unloads
+    /// them, so a model switch can't leave two native models resident.
+    private var retired: [XybridModel] = []
 
     func isLoaded(_ entry: ModelCatalog.Entry) -> Bool {
         lock.withLock { model != nil && loadedEntry?.id == entry.id }
@@ -188,6 +191,7 @@ final class XybridLLMBackend: @unchecked Sendable {
     /// conversation still runs on it; its weights go when the last reference does).
     func forget() {
         lock.withLock {
+            if let model { retired.append(model) }
             model = nil
             loadedEntry = nil
         }
@@ -196,11 +200,11 @@ final class XybridLLMBackend: @unchecked Sendable {
     /// Unloads the model and asks Xybrid to release idle native memory. Call with `GPUGate`
     /// held (no generation running).
     func unload() async {
-        let held: XybridModel? = lock.withLock {
-            defer { model = nil; loadedEntry = nil }
-            return model
+        let held: [XybridModel] = lock.withLock {
+            defer { model = nil; loadedEntry = nil; retired = [] }
+            return retired + (model.map { [$0] } ?? [])
         }
-        if let held { try? await held.unloadAsync() }
+        for m in held { try? await m.unloadAsync() }
         // Also frees a model a finished conversation dropped after `forget()` (idle models only).
         if Xybrid.isInitialized { Xybrid.releaseMemory() }
     }
@@ -262,7 +266,7 @@ final class XybridConversation: ModelConversation, @unchecked Sendable {
         self.maxTokens = UInt32(max(1, maxTokens))
         self.temperature = temperature
         let supportsTools = model.supportsToolCalling() ?? true
-        self.tools = supportsTools ? tools.compactMap(Self.definition) : []
+        self.tools = supportsTools ? tools.compactMap(XybridConversation.definition) : []
         if !instructions.isEmpty {
             try context.setSystem(envelope: Self.message(instructions, role: "system"))
         }
@@ -468,7 +472,9 @@ private final class GGUFDownload: NSObject, URLSessionDownloadDelegate, @uncheck
             defer { continuation = nil }
             return (continuation, finishError)
         }
-        if let failure = error ?? moveError {
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            c?.resume(throwing: CancellationError())   // a cancelled task, not a failed download
+        } else if let failure = error ?? moveError {
             c?.resume(throwing: failure)
         } else {
             c?.resume()

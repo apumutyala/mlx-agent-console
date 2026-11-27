@@ -190,7 +190,8 @@ enum EngineAB {
             var repResults: [BenchReceipt.Rep] = []
             var firstText = ""
             var promptTokens = 0
-            var shortest = Int.max
+            var shortest = Int.max          // over reps whose token count Xybrid reported
+            var unknownCounts = false
             for i in 0..<reps {
                 if isCancelled() || Task.isCancelled { return await finish("cancelled") }
                 progress(.init(message: "\(entry.displayName) · rep \(i + 1)/\(reps)",
@@ -209,8 +210,9 @@ enum EngineAB {
                 receipt.memoryProbe = probe
                 JetsamBreadcrumb.update(phase: "rep \(i + 1)/\(reps) done")
 
+                // nil = Xybrid didn't report a count: keep it unknown, don't treat it as 0 tokens.
                 let n = m.tokensOut ?? 0
-                shortest = min(shortest, n)
+                if let reported = m.tokensOut { shortest = min(shortest, reported) } else { unknownCounts = true }
                 if i == 0 { firstText = m.text }
                 promptTokens = m.tokensIn ?? promptTokens
                 let ttft = (m.ttftMs ?? 0) / 1000
@@ -237,6 +239,14 @@ enum EngineAB {
                 outputPreview: String(firstText.prefix(300)),
                 deterministic: Set(repResults.map(\.outputHash)).count == 1,
                 stopTokenIndex: shortest < workload.maxTokens ? shortest : nil, warmupS: warmupS))
+            if unknownCounts {
+                receipt.warnings = (receipt.warnings ?? []) + [
+                    "Xybrid reported no generated-token count for some reps (generated_tokens 0 there = unknown)"]
+            }
+            if promptTokens == 0 {
+                receipt.warnings = (receipt.warnings ?? []) + [
+                    "Xybrid reported no prompt-token count (prompt_tokens 0 = unknown)"]
+            }
             if shortest < workload.maxTokens {
                 receipt.warnings = (receipt.warnings ?? []) + [
                     "a rep stopped at end-of-turn after \(shortest) of \(workload.maxTokens) tokens; "

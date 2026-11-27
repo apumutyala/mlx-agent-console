@@ -40,7 +40,7 @@ struct DownloadedModelsView: View {
             }
             Section {
                 if xybridEntries.isEmpty { Text("None").foregroundStyle(.secondary) }
-                ForEach(xybridEntries, id: \.modelId) { e in
+                ForEach(xybridEntries, id: \.path) { e in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(e.modelId).font(.subheadline)
@@ -149,6 +149,11 @@ struct DownloadedModelsView: View {
     }
 
     private func deleteXybrid(_ id: String) {
+        if AppModel.shared.bench.isRunning { message = "A benchmark is running."; return }
+        if SpeechService.shared.isRecording || SpeechService.shared.isBusy {
+            message = "Speech is in use; try again when it finishes."
+            return
+        }
         let selected = ModelCatalog.selected
         if case .registry(let selectedID) = selected.xybridSource, selectedID == id {
             message = "\(id) is the selected chat model; pick another model first."
