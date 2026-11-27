@@ -39,6 +39,8 @@ targets:
         product: MLXLMCommon
       - package: MLXSwiftLM
         product: MLXHuggingFace
+      - package: MLXSwiftLM
+        product: MLXEmbedders               # memory: optional LFM2.5-Embedding-350M
       - package: MLXSwift
         product: MLX
       - package: MLXSwift

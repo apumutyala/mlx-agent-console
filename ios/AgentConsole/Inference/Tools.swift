@@ -329,30 +329,29 @@ struct SubmitWorkerJobTool: AgentTool {
 typealias ConfirmHandler = @Sendable (String) async -> Bool
 
 struct ToolRegistry: Sendable {
-    private let runners: [String: @Sendable (Data, ConfirmHandler) async throws -> String]
+    private var runners: [String: @Sendable (Data, ConfirmHandler) async throws -> String] = [:]
     /// Native declarations handed to the model.
-    let specifications: [ToolSpecification]
+    private(set) var specifications: [ToolSpecification] = []
     /// "name: summary" lines for the system prompt.
     var descriptions: [String] { specifications.map { "\($0.name): \($0.description)" } }
 
     init(summarize: SummarizeImportedFileTool, submitJob: SubmitWorkerJobTool?) {
-        var r: [String: @Sendable (Data, ConfirmHandler) async throws -> String] = [:]
-        var s: [ToolSpecification] = []
-        func add<T: AgentTool>(_ tool: T, keys: Set<String>) {
-            r[T.name] = { data, confirm in
-                let args = try strictDecode(T.Arguments.self, from: data, allowedKeys: keys)
-                try await tool.validate(args)
-                if let prompt = tool.confirmationPrompt(args), !(await confirm(prompt)) {
-                    throw ToolError.denied(prompt)
-                }
-                return try await tool.run(args)
+        register(summarize, keys: ["fileID"])
+        if let submitJob { register(submitJob, keys: ["type", "params"]) }
+    }
+
+    /// Adds a tool; `keys` are the only argument names it accepts.
+    mutating func register<T: AgentTool>(_ tool: T, keys: Set<String>) {
+        runners[T.name] = { data, confirm in
+            let args = try strictDecode(T.Arguments.self, from: data, allowedKeys: keys)
+            try await tool.validate(args)
+            if let prompt = tool.confirmationPrompt(args), !(await confirm(prompt)) {
+                throw ToolError.denied(prompt)
             }
-            s.append(T.specification)
+            return try await tool.run(args)
         }
-        add(summarize, keys: ["fileID"])
-        if let submitJob { add(submitJob, keys: ["type", "params"]) }
-        runners = r
-        specifications = s
+        specifications.removeAll { $0.name == T.name }
+        specifications.append(T.specification)
     }
 
     func execute(_ call: ToolCallProposal, confirm: ConfirmHandler) async throws -> String {

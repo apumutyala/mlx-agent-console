@@ -53,7 +53,9 @@ struct ChatView: View {
             .toolbar {
                 SpeakerToggle()
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
+                    .disabled(agent.isRunning)
             }
+            .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
                 loadError = nil
                 guard !(await backend.isLoaded) else { return }

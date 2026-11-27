@@ -47,6 +47,7 @@ struct SettingsView: View {
                         + "switching resets the chat." + Self.fitNote(entry) + suffix
                     Text(message)
                 }
+                MemorySettingsSection(memory: AppModel.shared.memory)
                 MemorySection(ignoreMemoryCheck: $ignoreMemoryCheck)
             }
             .navigationTitle("Settings")
