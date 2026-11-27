@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Settings › Inkling 2 Mini (LookAtMyQuant): the memory plan per build and the kernel self-check.
-/// The builds are not chat-loadable yet (docs/LAMQ-FORMAT-SPEC.md, "What is left").
+/// The 3.9 GB build is also a picker entry (`ModelCatalog.inkling2MiniLamq39`); the streamed
+/// 4.7 / 5.4 GB builds are listed here only (docs/LAMQ-FORMAT-SPEC.md, "What is left").
 struct LamqSettingsSection: View {
     @State private var running = false
     @State private var status: String?
@@ -38,9 +39,10 @@ struct LamqSettingsSection: View {
                 Button("Delete self-check download") { LamqSelfCheck.removeDownloads() }.font(.caption)
             }
         } header: { Text("Inkling 2 Mini · LookAtMyQuant (experimental)") } footer: {
-            Text("Trellis-coded 1.2–1.65 bit builds. Their Metal kernels are new and the model is not yet "
-                 + "wired into chat, so they can't be picked above. The self-check compares this iPad's "
-                 + "kernels with the reference decoder, bit for bit; share its report.")
+            Text("Trellis-coded 1.2–1.65 bit builds with new Metal kernels. The 3.9 GB build is in the model "
+                 + "picker above (fully resident); the 4.7 / 5.4 GB builds need expert streaming, not built yet. "
+                 + "Run the self-check before the first chat: it compares this iPad's kernels with the "
+                 + "reference decoder, bit for bit. Share its report.")
         }
     }
 

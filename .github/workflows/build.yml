@@ -28,7 +28,7 @@ jobs:
         working-directory: ios/tools/lamq
         run: |
           pip install numpy
-          python -m unittest -v test_lamq_ref
+          python -m unittest -v test_lamq_ref test_steering_map
 
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.

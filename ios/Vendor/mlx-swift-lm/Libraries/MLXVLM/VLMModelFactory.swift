@@ -441,6 +441,12 @@ public final class VLMModelFactory: GenericModelFactory {
                 configurationURL.lastPathComponent, configuration.name, error)
         }
 
+        // [agent-console patch D] A LookAtMyQuant packed Inkling 2 build reads its packed files
+        // from the model directory while its steering tensors load (InklingLamqModel.swift).
+        if let inkling = model as? Inkling2, InklingLamqSteering.isPackedDirectory(modelDirectory) {
+            inkling.useLamqPackedDirectory(modelDirectory)
+        }
+
         // Load EOS token IDs from config.json, with optional override from generation_config.json
         var eosTokenIds = baseConfig.effectiveEOSTokenIds
         let generationConfigURL = modelDirectory.appending(component: "generation_config.json")

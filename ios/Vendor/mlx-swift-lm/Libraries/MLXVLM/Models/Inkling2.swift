@@ -1272,7 +1272,10 @@ private final class Inkling2Router: Module {
 
 private final class Inkling2SparseMoE: Module {
     @ModuleInfo(key: "gate") var router: Inkling2Router
-    @ModuleInfo var experts: Inkling2Experts
+    // [agent-console patch D] Optional: a LookAtMyQuant packed build removes it and routes the
+    // experts through `lamqExperts` instead (InklingLamqModel.swift).
+    @ModuleInfo var experts: Inkling2Experts?
+    let lamqExperts = InklingLamqExpertsBox()
 
     init(_ config: Inkling2TextConfiguration) {
         _router.wrappedValue = Inkling2Router(config)
@@ -1282,7 +1285,16 @@ private final class Inkling2SparseMoE: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, weights) = router(x)
-        return weightedExperts(experts(x, indices), weights[.ellipsis, .newAxis])
+        if let lamq = lamqExperts.value {
+            // [agent-console patch D] Weighted sum of the packed experts, float32 -> x's dtype.
+            let d = x.dim(-1)
+            let rows = x.size / d
+            let out = lamq(
+                x.reshaped(rows, d), ids: indices.reshaped(rows, -1),
+                weights: weights.reshaped(rows, -1))
+            return out.reshaped(x.shape).asType(x.dtype)
+        }
+        return weightedExperts(experts!(x, indices), weights[.ellipsis, .newAxis])
     }
 
     /// The layer output `residual + convolution(self(x))` of a prefill chunk and the window of
@@ -1294,7 +1306,8 @@ private final class Inkling2SparseMoE: Module {
         _ x: MLXArray, residual: MLXArray, convolution: Inkling2ShortConvolution,
         state: MLXArray?, mask: MLXArray?, keepsWindow: Bool
     ) -> (MLXArray, MLXArray) {
-        guard convolution.usesKernel(mask: mask), !keepsWindow else {
+        // [agent-console patch D] Packed experts combine first, then convolve (the fallback).
+        guard convolution.usesKernel(mask: mask), !keepsWindow, let experts else {
             let (output, window) = convolution(
                 self(x), state: state, mask: mask, keepsWindow: keepsWindow)
             return (residualAdd(residual, output), window)
@@ -1313,7 +1326,19 @@ private final class Inkling2SparseMoE: Module {
         convolutionWeight: MLXArray
     ) -> (MLXArray, MLXArray) {
         let (indices, weights) = router(routerInput)
-        return experts.decode(
+        if let lamq = lamqExperts.value {
+            // [agent-console patch D] Fused packed-expert matvecs, then the same epilogue the
+            // unfused path uses (weighted sum, convolution, residual).
+            let rows = indices.dim(0)
+            let outputs = lamq.slotOutputs(
+                x.reshaped(rows, x.dim(-1)), ids: indices.reshaped(rows, -1)
+            ).asType(x.dtype)
+            let out = inkling2ExpertEpilogue(
+                outputs: outputs, weights: weights, residual: residual, state: state,
+                convolutionWeight: convolutionWeight)
+            return (out.hidden, out.state)
+        }
+        return experts!.decode(
             x, indices: indices, weights: weights, residual: residual, state: state,
             convolutionWeight: convolutionWeight)
     }
@@ -1853,6 +1878,15 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     /// Loads the vision tower on the first image when the factory loads the model without it.
     private let onDemandVision: OnDemandComponent<Inkling2Vision>?
 
+    /// [agent-console patch D] The LookAtMyQuant packed directory this model loads from, if any.
+    private let lamqSource = InklingLamqSourceBox()
+
+    /// [agent-console patch D] Called by `VLMModelFactory` before the weights load when the model
+    /// directory holds a LookAtMyQuant packed build (`InklingLamqSteering.isPackedDirectory`).
+    public func useLamqPackedDirectory(_ directory: URL) {
+        lamqSource.directory = directory
+    }
+
     public var vocabularySize: Int { config.textConfiguration.unpaddedVocabularySize }
 
     /// Thinking, answers and tool calls arrive in their own message frames.
@@ -2026,6 +2060,17 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     /// Converts Thinking Machines' layout, strips the `model.` scope and sets each expert layer to
     /// its checkpoint's quantization.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        // [agent-console patch D] A LookAtMyQuant packed build: steering tensors + packed files.
+        if let directory = lamqSource.directory,
+            InklingLamqSteering.isSteering(checkpoint.weights.keys)
+        {
+            return try prepareLamqCheckpoint(checkpoint, directory: directory)
+        }
+        return try prepareConvertedCheckpoint(checkpoint)
+    }
+
+    /// PR #821's own preparation (unchanged; split out by patch D).
+    private func prepareConvertedCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Inkling2Checkpoint.convertingOriginalLayout(checkpoint)
         var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count)
         for (key, value) in checkpoint.weights {
@@ -2062,7 +2107,7 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
                     inputDims: text.intermediateSize)
             else { continue }
             let mlp = languageModel.layers[layer].mlp
-            if mlp.experts.gateUpProj.format != gateUp || mlp.experts.downProj.format != down {
+            if mlp.experts?.gateUpProj.format != gateUp || mlp.experts?.downProj.format != down {
                 let experts = Inkling2Experts(text, gateUp: gateUp, down: down)
                 try mlp.update(
                     modules: ModuleChildren(values: ["experts": .value(experts)]), verify: .none)
@@ -2070,6 +2115,73 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         }
         checkpoint.weights = weights
         return checkpoint
+    }
+}
+
+// MARK: - [agent-console patch D] LookAtMyQuant packed builds
+
+extension Inkling2 {
+    /// The checkpoint of a LookAtMyQuant packed build in this model's layout, with the packed
+    /// layers installed (docs/LAMQ-FORMAT-SPEC.md §8-9, InklingLamqModel.swift).
+    ///
+    /// `checkpoint` holds `steering.safetensors` only. Every steering tensor is renamed (an
+    /// unknown one is an error). The six attention linears of each layer, the embedding and the
+    /// head become packed layers whose `[rows, 0]` placeholder weights go into the checkpoint,
+    /// so the strict update that follows still checks every other parameter. The routed experts
+    /// leave the module tree; the layer's MoE runs them from `lamqExperts`.
+    fileprivate func prepareLamqCheckpoint(_ checkpoint: ModelCheckpoint, directory: URL) throws
+        -> ModelCheckpoint
+    {
+        let text = config.textConfiguration
+        var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count + 160)
+        for (name, value) in checkpoint.weights {
+            guard let mapped = InklingLamqSteering.mappedName(name) else {
+                throw InklingLamqError.unsupported("steering tensor \(name)")
+            }
+            weights[mapped] = InklingLamqSteering.transform(name, value)
+        }
+
+        let tables = try InklingLamqTables(directory: directory)
+        for (index, layer) in languageModel.layers.enumerated() {
+            let meta = try InklingLamqSteering.layerMeta(directory, index)
+            let npz = try InklingLamqSteering.layerFile(directory, index)
+            var children = [String: NestedItem<String, Module>]()
+            for (lamqName, key) in InklingLamqSteering.attentionLinears {
+                guard let linearMeta = meta.linears[lamqName] else {
+                    throw InklingLamqError.file("layer \(index) has no \(lamqName)")
+                }
+                let packed = try InklingLamqPackedLinear(
+                    name: lamqName, meta: linearMeta, npz: npz, tables: tables)
+                let module = InklingLamqLinearLayer(packed)
+                children[key] = .value(module)
+                weights["language_model.layers.\(index).self_attn.\(key).weight"] = module.weight
+            }
+            try layer.attention.update(modules: ModuleChildren(values: children), verify: .none)
+            layer.mlp.lamqExperts.value = try InklingLamqPackedExperts(
+                npz: npz, tables: tables, hidden: text.hiddenSize,
+                intermediate: text.intermediateSize)
+            try layer.mlp.update(
+                modules: ModuleChildren(values: ["experts": NestedItem<String, Module>.none]),
+                verify: .none)
+        }
+
+        let embed = InklingLamqEmbeddingLayer(
+            try InklingLamqBuckets(
+                directory: directory, kind: "embed", tables: tables, hidden: text.hiddenSize))
+        try languageModel.update(
+            modules: ModuleChildren(values: ["embed_tokens": .value(embed)]), verify: .none)
+        weights["language_model.embed_tokens.weight"] = embed.weight
+
+        let head = InklingLamqHeadLayer(
+            try InklingLamqBuckets(
+                directory: directory, kind: "head", tables: tables, hidden: text.hiddenSize))
+        try update(modules: ModuleChildren(values: ["lm_head": .value(head)]), verify: .none)
+        weights["lm_head.weight"] = head.weight
+
+        var result = checkpoint
+        result.weights = weights
+        result.perLayerQuantization = nil
+        return result
     }
 }
 

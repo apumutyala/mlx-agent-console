@@ -1,10 +1,8 @@
 // [agent-console patch D] LookAtMyQuant ("lamq") packed Inkling 2 Mini: packed layers built from
 // the packed files. Not part of mlx-swift-lm PR #821. Spec: docs/LAMQ-FORMAT-SPEC.md §6-7, §9.
 //
-// NOT YET WIRED into `Inkling2.swift`: these compute the packed linears, experts, embedding and
-// head exactly as the spec defines them, and the self-check exercises them, but the Inkling 2
-// forward pass still builds its own `Linear`/expert modules from safetensors. Wiring needs the
-// HF -> PR #821 steering-name map (spec §8, "What is left" 3).
+// Wired into `Inkling2.swift` by InklingLamqModel.swift (the `Linear`/`Embedding` subclasses and
+// the experts box); the self-check exercises the same classes against the reference digests.
 
 import Foundation
 import MLX
@@ -257,18 +255,28 @@ public final class InklingLamqPackedExperts: @unchecked Sendable {
     /// - Parameters:
     ///   - x: `[T, hidden]` (unrotated).
     ///   - ids: int32 `[T, K]` routed expert ids. weights: float32 `[T, K]` (normalised * route_scale).
-    public func callAsFunction(_ x: MLXArray, ids: MLXArray, weights: MLXArray) -> MLXArray {
+    /// The unweighted output of each routed expert, float32 `[T, K, hidden]`, through the fused
+    /// decode matvec (T <= `lamqMatvecMaxTokens`): one launch per format and side.
+    public func slotOutputs(_ x: MLXArray, ids: MLXArray) -> MLXArray {
         let t = x.dim(0)
         let k = ids.dim(1)
         let xRot = gateUp.rot.input(x, signs: gateUp.signsIn)
+        let flat = ids.reshaped([-1])
+        let gu = gateUp.matvec(xRot, experts: flat, xDiv: k)                 // [T*K, 2I]
+        let act = lamqSoftcappedSwiGLU(gu)
+        let actRot = down.rot.input(act, signs: down.signsIn)
+        let dn = down.matvec(actRot, experts: flat, xDiv: 1)                // [T*K, D]
+        return dn.reshaped([t, k, down.m])
+    }
+
+    public func callAsFunction(_ x: MLXArray, ids: MLXArray, weights: MLXArray) -> MLXArray {
+        let t = x.dim(0)
+        let k = ids.dim(1)
         if t <= lamqMatvecMaxTokens {
-            let flat = ids.reshaped([-1])
-            let gu = gateUp.matvec(xRot, experts: flat, xDiv: k)                 // [T*K, 2I]
-            let act = lamqSoftcappedSwiGLU(gu)
-            let actRot = down.rot.input(act, signs: down.signsIn)
-            let dn = down.matvec(actRot, experts: flat, xDiv: 1)                // [T*K, D]
-            return sum(dn.reshaped([t, k, down.m]) * expandedDimensions(weights.asType(.float32), axis: -1), axis: 1)
+            let outputs = slotOutputs(x, ids: ids)
+            return sum(outputs * expandedDimensions(weights.asType(.float32), axis: -1), axis: 1)
         }
+        let xRot = gateUp.rot.input(x, signs: gateUp.signsIn)
         // Prefill: one expert at a time over the tokens routed to it, float16 tiles.
         let hostIds = ids.asType(.int32).asArray(Int32.self)
         var tokensOf: [Int: [(token: Int, slot: Int)]] = [:]

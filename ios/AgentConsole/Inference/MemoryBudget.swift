@@ -66,10 +66,16 @@ enum MemoryBudget {
         guard let resident = entry.residentGB else { return .unchecked }
         let available = availableBytes
         guard available > 0 else { return .unchecked }
-        let needed = Int(resident * 1e9) + headroomBytes
+        let needed = Int(resident * 1e9) + headroom(entry)
         let budget = available + (includingHeld ? heldByModel() : 0)
         return needed <= budget ? .fits(neededBytes: needed, budgetBytes: budget)
                                 : .tooLarge(neededBytes: needed, budgetBytes: budget)
+    }
+
+    /// Memory kept free beyond an entry's resident weights: its own estimate when it has one
+    /// (LookAtMyQuant builds: no 0.9 GB+ dequantized copies, smaller KV budget), else 1.5 GiB.
+    static func headroom(_ entry: ModelCatalog.Entry) -> Int {
+        entry.headroomGB.map { Int($0 * 1e9) } ?? headroomBytes
     }
 
     static func gb(_ bytes: Int) -> String { String(format: "%.2f GB", Double(bytes) / 1e9) }
@@ -82,7 +88,7 @@ enum MemoryBudget {
             case .insufficientMemory(let model, let needed, let budget, let held):
                 // What iOS lets the whole app use: free memory now plus what MLX already holds.
                 let appLimit = budget + held
-                var text = "\(model) needs about \(MemoryBudget.gb(needed)) (weights + 1.5 GB headroom); "
+                var text = "\(model) needs about \(MemoryBudget.gb(needed)) (weights + headroom); "
                     + "iOS allows this app about \(MemoryBudget.gb(appLimit)) and \(MemoryBudget.gb(budget)) is free now."
                 if Double(appLimit) < 0.45 * Double(MemoryBudget.physicalBytes) {
                     // ~5.3 GB on a 16 GB iPad: the default jetsam limit, not the raised one.

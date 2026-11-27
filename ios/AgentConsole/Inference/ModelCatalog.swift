@@ -37,6 +37,11 @@ enum ModelCatalog {
         var prefillStepSize: Int? = nil
         /// Chat-template `reasoning_effort` (Inkling: none/minimal/low/medium/high/xhigh/max).
         var reasoningEffort: String? = nil
+        /// Memory kept free beyond `residentGB`, in GB; nil = `MemoryBudget.headroomBytes` (1.5 GiB).
+        var headroomGB: Double? = nil
+        /// LookAtMyQuant packed build: the pinned Hugging Face revision. Its `.npz` files are
+        /// downloaded too, and MLXVLM's patch D loads it (docs/LAMQ-FORMAT-SPEC.md).
+        var lamqRevision: String? = nil
 
         var sizeLabel: String {
             downloadGB < 1 ? "\(Int((downloadGB * 1000).rounded())) MB" : String(format: "%.1f GB", downloadGB)
@@ -100,13 +105,28 @@ enum ModelCatalog {
         repo: "roman220220/Inkling-2-Mini-gptq-mlx-jang", downloadGB: 13.5, residentGB: 12.49,
         note: "Highest-quality Inkling build that might fit; needs a very high per-app memory limit.")
 
-    static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3]
 
     // MARK: Inkling 2 Mini, LookAtMyQuant trellis builds (docs/LAMQ-FORMAT-SPEC.md)
     //
-    // Not chat-loadable yet: the packed kernels and loader exist (MLXVLM InklingLamq*.swift) but are
-    // not wired into the Inkling 2 forward pass. Listed for the Settings self-check and the memory
-    // plan only, never in `all`, so the picker can't select one.
+    // The 3.9 GB build loads fully resident through MLXVLM patch D and is in the picker
+    // (`inkling2MiniLamq39`). The 4.7 / 5.4 GB builds need ~0.6 / ~1.3 GB of experts streamed
+    // (PR #9's slot cache, interface not agreed yet): Settings lists them with their memory plan
+    // only, never in `all`.
+
+    /// Resident footprint beyond the packed files, GB: KV ~0.29 at 4K, prefill tiles ~0.2,
+    /// Metal/runtime/app ~0.3-0.4 (spec §10). An estimate until the first device receipt.
+    static let lamqHeadroomGB = 0.9
+
+    /// 1.18 bits/param, 3.85 GB of files, fully resident (~4.75 GB with `lamqHeadroomGB`).
+    /// Card: GSM8K 86.5% (BF16 94.0), HumanEval 59.2% (BF16 89.6), 6-class chat KL 0.233.
+    static let inkling2MiniLamq39 = Entry(
+        id: "inkling2-mini-lamq-3.9", displayName: "Inkling 2 Mini · LookAtMyQuant 1.2-bit",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-3.9GB", downloadGB: 3.85,
+        note: "Thinking Machines' 26B MoE in 3.9 GB (trellis-coded). Experimental: new Metal kernels; "
+            + "run Settings › LookAtMyQuant self-check first.",
+        minimumMemoryGB: 14, thinks: true, temperature: 0.6, loader: .vlm,
+        residentGB: 3.85, contextTokens: 4096, prefillStepSize: 512, reasoningEffort: "low",
+        headroomGB: lamqHeadroomGB, lamqRevision: "fbee46a43565d8efac84e89edc196add5f28b254")
 
     struct LamqBuild: Identifiable, Hashable, Sendable {
         enum Plan: Hashable, Sendable {
@@ -126,9 +146,8 @@ enum ModelCatalog {
         /// Card results (greedy, `max_new_tokens` 1,536, no thinking cap): GSM8K 200 / HumanEval 164.
         let card: String
 
-        /// Beyond the weights: KV (~0.3 GB at 4K, 0.42 at 8K), prefill tiles (~0.2), runtime/app
-        /// (~0.3-0.4). Estimate, not measured (spec §10).
-        static let overheadGB = 0.9
+        /// Beyond the weights (spec §10): an estimate, not measured.
+        static var overheadGB: Double { ModelCatalog.lamqHeadroomGB }
 
         var residentNeedGB: Double { totalGB + Self.overheadGB }
     }
@@ -150,6 +169,8 @@ enum ModelCatalog {
         plan: .streamed(streamGB: 1.3), card: "GSM8K 92.5% · HumanEval 76.8%")
 
     static let lamqBuilds: [LamqBuild] = [lamq39, lamq47, lamq54]
+
+    static let inklingTiers: [Entry] = [inkling2MiniLamq39, inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3]
 
     static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
     static let defaultEntry = lfm3_1_7b
