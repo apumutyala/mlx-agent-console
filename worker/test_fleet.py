@@ -123,6 +123,7 @@ class FleetTests(unittest.TestCase):
         self.node("ipad-1")
         _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
         self.c.call("GET", "/nodes/ipad-1/next?wait=1")
+        self.c.call("POST", f"/tasks/{t['id']}/events", {"node_id": "ipad-1", "events": []})  # running
         self.assertEqual(self.c.call("POST", f"/tasks/{t['id']}/cancel")[0], 202)
         _, r = self.c.call("POST", f"/tasks/{t['id']}/events", {"node_id": "ipad-1", "events": []})
         self.assertTrue(r["cancel"])
@@ -142,12 +143,86 @@ class FleetTests(unittest.TestCase):
         _, final = self.c.call("GET", f"/tasks/{t['id']}")
         self.assertEqual(final["status"], "lost")  # max_attempts=2
 
-    def test_restart_requeues_inflight(self):
+    def test_restart_keeps_inflight_with_owner(self):
         self.node("ipad-1")
         _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
         self.c.call("GET", "/nodes/ipad-1/next?wait=1")
-        fleet2 = federated.Fleet(Path(self.tmp.name))
-        self.assertEqual(fleet2.tasks[t["id"]].meta["status"], "queued")
+        fleet2 = federated.Fleet(Path(self.tmp.name))   # worker restart
+        self.assertEqual(fleet2.tasks[t["id"]].meta["status"], "assigned")
+        self.assertEqual(fleet2.next_task("ipad-1", 0)["id"], t["id"])  # owner gets it back
+
+    def test_restart_with_exhausted_inflight_task_does_not_crash(self):
+        self.node("ipad-1")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        task = self.fleet.tasks[t["id"]]
+        self.c.call("GET", "/nodes/ipad-1/next?wait=1")
+        task.meta["attempts"] = 99
+        task.save_meta()
+        fleet2 = federated.Fleet(Path(self.tmp.name), offline_after=0.01)
+        time.sleep(0.05)
+        fleet2.sweep()   # owner offline -> attempts exhausted -> lost, with listeners present
+        self.assertEqual(fleet2.tasks[t["id"]].meta["status"], "lost")
+
+    def test_lost_claim_response_is_redelivered(self):
+        self.node("ipad-1")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        self.fleet.next_task("ipad-1", 0)            # claimed; response "lost"
+        st, nxt = self.c.call("GET", "/nodes/ipad-1/next?wait=0")
+        self.assertEqual(nxt["task"]["id"], t["id"])
+        self.assertEqual(self.fleet.tasks[t["id"]].meta["attempts"], 1)
+
+    def test_poll_while_owning_running_task_requeues_it(self):
+        self.node("ipad-1"), self.node("ipad-2")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        self.c.call("GET", "/nodes/ipad-1/next?wait=1")
+        self.c.call("POST", f"/tasks/{t['id']}/events", {"node_id": "ipad-1", "events": []})  # running
+        # The app paused/restarted and polled again: the abandoned task is requeued
+        # (burning an attempt) and handed out fresh, here to the same idle node.
+        _, again = self.c.call("GET", "/nodes/ipad-1/next?wait=0")
+        self.assertEqual(again["task"]["id"], t["id"])
+        self.assertEqual(again["task"]["status"], "assigned")
+        self.assertEqual(again["task"]["attempts"], 2)
+
+    def test_cancel_assigned_task_is_immediate(self):
+        self.node("ipad-1")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        self.c.call("GET", "/nodes/ipad-1/next?wait=1")
+        _, c = self.c.call("POST", f"/tasks/{t['id']}/cancel")
+        self.assertEqual(c["status"], "cancelled")
+        st, _ = self.c.call("POST", f"/tasks/{t['id']}/events", {"node_id": "ipad-1", "events": []})
+        self.assertEqual(st, 409)   # the node learns to stop
+
+    def test_concurrent_polls_never_double_claim(self):
+        nodes = [f"ipad-{i}" for i in range(6)]
+        for n in nodes:
+            self.node(n)
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        got = []
+        ths = [threading.Thread(target=lambda n=n: got.append(self.fleet.next_task(n, 0.5))) for n in nodes]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join()
+        self.assertEqual(sum(1 for g in got if g and g["id"] == t["id"]), 1)
+
+    def test_pinned_task_expires_when_target_stays_offline(self):
+        self.fleet.queue_deadline = 0.5
+        self.node("ipad-1")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}, "node": "ipad-1"})
+        time.sleep(2.2)          # offline_after=1.5, then past the deadline
+        self.fleet.sweep()
+        self.assertEqual(self.fleet.tasks[t["id"]].meta["status"], "lost")
+
+    def test_negative_content_length_rejected(self):
+        import http.client
+        host, port = self.server.server_address
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.putrequest("POST", "/tasks")
+        conn.putheader("Authorization", f"Bearer {self.token}")
+        conn.putheader("Content-Length", "-5")
+        conn.endheaders()
+        self.assertEqual(conn.getresponse().status, 400)
+        conn.close()
 
     def test_validation(self):
         self.assertEqual(self.c.call("POST", "/tasks", {"kind": "shell", "payload": {}})[0], 400)
@@ -175,8 +250,11 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(st, 201)
             self.c.call("POST", f"/tasks/{task['id']}/complete",
                         {"node_id": nid, "status": "succeeded", "metrics": {"num_examples": n_ex}})
-        _, done = self.c.call("GET", f"/fed/rounds/{r['id']}")
+        done = self.wait_round(r["id"])
         self.assertEqual(done["status"], "aggregated", done)
+        # per-device adapters are never downloadable; only the average is
+        st, _ = self.c.call("GET", f"/tasks/{next(iter(r['tasks']))}/artifacts/adapter.safetensors")
+        self.assertEqual(st, 403)
         st, blob = self.c.call("GET", f"/fed/rounds/{r['id']}/adapter")
         path = Path(self.tmp.name) / "avg.safetensors"
         path.write_bytes(blob)
@@ -186,21 +264,69 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(list(tensors["layers.0.lora_b"][1]), [3.0, 1.0])
         self.assertEqual(meta["contributors"], "2")
         # next round continues from it
-        st, r2 = self.c.call("POST", "/fed/rounds", {"base_model": "mlx-community/LFM2-1.2B-4bit",
-                                                     "nodes": ["ipad-1"], "parent_round": "latest"})
+        st, bad = self.c.call("POST", "/fed/rounds", {"base_model": "mlx-community/LFM2-1.2B-4bit",
+                                                      "nodes": ["ipad-1"], "parent_round": "latest", "rank": 16,
+                                                      "use_local_data": True})
+        self.assertEqual(st, 400, bad)   # rank must match the parent's adapter
+        st, r2 = self.c.call("POST", "/fed/rounds", {"base_model": "MLX-community/lfm2-1.2B-4bit",
+                                                     "nodes": ["ipad-1"], "parent_round": "latest",
+                                                     "use_local_data": True})
         self.assertEqual(st, 201, r2)
         _, nxt = self.c.call("GET", "/nodes/ipad-1/next?wait=2")
         self.assertEqual(nxt["task"]["payload"]["init_adapter"], f"fed/rounds/{r['id']}/adapter")
         self.assertTrue(nxt["task"]["payload"]["use_local_data"])
 
+    def wait_round(self, rid, timeout=10):
+        deadline = time.time() + timeout
+        while True:
+            _, r = self.c.call("GET", f"/fed/rounds/{rid}")
+            if r["status"] != "running" or time.time() > deadline:
+                return r
+            time.sleep(0.05)
+
     def test_round_fails_cleanly_without_adapters(self):
         self.node("ipad-1", kinds=("train_lora",))
-        _, r = self.c.call("POST", "/fed/rounds", {"base_model": "m/x-1"})
+        _, r = self.c.call("POST", "/fed/rounds", {"base_model": "m/x-1",
+                                                   "examples": [{"text": "a"}, {"text": "b"}]})
         _, nxt = self.c.call("GET", "/nodes/ipad-1/next?wait=2")
         self.c.call("POST", f"/tasks/{nxt['task']['id']}/complete",
                     {"node_id": "ipad-1", "status": "failed", "error": "oom"})
-        _, done = self.c.call("GET", f"/fed/rounds/{r['id']}")
-        self.assertEqual(done["status"], "failed")
+        self.assertEqual(self.wait_round(r["id"])["status"], "failed")
+
+    def test_round_validation_happens_before_dispatch(self):
+        self.node("ipad-1", kinds=("train_lora",))
+        self.node("ipad-9", kinds=("generate",))
+        base = {"base_model": "m/x-1", "examples": [{"text": "a"}, {"text": "b"}]}
+        cases = [
+            {**base, "nodes": ["ipad-9"]},                                   # can't train
+            {"base_model": "m/x-1"},                                         # no data, no local opt-in
+            {**base, "examples": [{"text": "x" * 8001}, {"text": "b"}]},     # example too long
+            {**base, "examples": [{"text": "a", "evil": "b"}, {"text": "c"}]},
+            {**base, "examples": [{"text": "y" * 7000} for _ in range(120)]},  # payload too large
+        ]
+        for spec in cases:
+            st, _ = self.c.call("POST", "/fed/rounds", spec)
+            self.assertEqual(st, 400, spec.get("nodes") or list(spec))
+        self.assertEqual(self.fleet.tasks, {})   # nothing was dispatched
+        _, rounds = self.c.call("GET", "/fed/rounds")
+        self.assertEqual(rounds["rounds"], [])
+
+    def test_round_deadline_aggregates_what_succeeded(self):
+        a = {"w": [2.0]}
+        for n in ("ipad-1", "ipad-2"):
+            self.node(n, kinds=("train_lora",))
+        _, r = self.c.call("POST", "/fed/rounds", {"base_model": "m/x-1", "deadline_seconds": 60,
+                                                   "examples": [{"text": str(i)} for i in range(4)]})
+        _, nxt = self.c.call("GET", "/nodes/ipad-1/next?wait=2")
+        tid = nxt["task"]["id"]
+        self.c.call("PUT", f"/tasks/{tid}/artifacts/adapter.safetensors?node_id=ipad-1", raw=adapter_bytes(a))
+        self.c.call("POST", f"/tasks/{tid}/complete", {"node_id": "ipad-1", "status": "succeeded"})
+        fed = self.router.federation
+        fed.rounds[r["id"]]["deadline_at"] = 0     # ipad-2 never shows up; deadline passes
+        fed.expire()
+        done = self.wait_round(r["id"])
+        self.assertEqual(done["status"], "aggregated", done)
+        self.assertEqual(len(done["result"]["contributors"]), 1)
 
 
 if __name__ == "__main__":
