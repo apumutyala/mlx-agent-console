@@ -51,11 +51,11 @@ public enum InklingLamqSteering {
         switch name {
         case "model.embed_tokens.embed_norm.weight": return "language_model.embed_norm.weight"
         case "model.norm.weight", "model.final_input.query", "model.message_input.query":
-            return "language_model." + name.dropFirst("model.".count)
+            return "language_model." + String(name.dropFirst("model.".count))
         default: break
         }
         guard name.hasPrefix("model.layers.") else { return nil }
-        var rest = "language_model." + name.dropFirst("model.".count)
+        var rest = "language_model." + String(name.dropFirst("model.".count))
         let renames: [(String, String)] = [
             (".self_attn.q_proj.norm.scale", ".self_attn.q_l2_clip.scale"),
             (".self_attn.relative_position_bias.norm.scale", ".self_attn.rel_l2_clip.scale"),
