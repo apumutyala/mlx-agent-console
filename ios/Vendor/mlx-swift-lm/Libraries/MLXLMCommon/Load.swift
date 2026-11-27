@@ -161,6 +161,17 @@ func loadWeightArrays(urls: [URL]) throws -> (
     return (checkpoint.weights, checkpoint.metadata)
 }
 
+/// [agent-console patch C] A model that looks at its directory before the checkpoint is read and
+/// can skip tensors it supplies another way (Inkling 2 expert streaming reads its experts from
+/// `experts.bin`, so the stacked expert tensors must not be read even when a shard holds them).
+public protocol CheckpointLoadingHooks: AnyObject {
+    /// Called by ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:)-858j8``
+    /// before any tensor is read.
+    func willLoadCheckpoint(from directory: URL) throws
+    /// Tensors (by their name in the file) for which this returns false are not read.
+    var checkpointTensorFilter: (@Sendable (String) -> Bool)? { get }
+}
+
 /// Tensors under `excludedNamespaces` are never read. A file that holds only excluded tensors
 /// still supplies its metadata.
 func loadModelCheckpoint(urls: [URL], excludedNamespaces: [String] = []) throws
@@ -414,6 +425,10 @@ public func loadWeights(
     excludedComponents: Set<ModelComponent> = [],
     componentLoading: ComponentLoading = .onFirstUse
 ) throws {
+    // [agent-console patch C]
+    let hooks = model as? any CheckpointLoadingHooks
+    try hooks?.willLoadCheckpoint(from: modelDirectory)
+    let tensorFilter = hooks?.checkpointTensorFilter
     let additionalFiles = (model as? any AdditionalWeightFilesProviding)?.additionalWeightFiles
     let weightURLs = try safetensorWeightURLs(
         in: modelDirectory,
@@ -430,8 +445,16 @@ public func loadWeights(
     // The checkpoint goes out of scope before materialization, so tensors that preparation
     // replaces are freed by then.
     do {
-        var checkpoint = try loadModelCheckpoint(
-            urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        var checkpoint: ModelCheckpoint
+        if let tensorFilter {
+            let exclusions = CheckpointNameMapping(excludedNamespaces.map { .excludePrefix($0) })
+            checkpoint = try loadModelCheckpoint(urls: weightURLs) { name in
+                exclusions.mapName(name) != nil && tensorFilter(name)
+            }
+        } else {
+            checkpoint = try loadModelCheckpoint(
+                urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        }
         checkpoint.perLayerQuantization = perLayerQuantization
         checkpoint = try model.prepareCheckpoint(checkpoint)
         try applyCheckpoint(checkpoint, to: model)

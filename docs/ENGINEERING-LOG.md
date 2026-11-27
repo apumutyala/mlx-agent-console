@@ -29,6 +29,12 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
 | `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
+| `inkling-kernels` | O2: 2/3-bit affine in Inkling's fused decode expert kernels; Metal compile check in CI | `integration` | PR #8, merged into `integration-next2` |
+| `inkling-stream` | Inkling SSD expert streaming (repack tool, slot cache, streamed tiers, worker /models) | `integration` | PR #9, merged into `integration-next2` via #10 |
+| `lfm-moe-stream` | expert streaming generalised to SwitchGLU MoEs; LFM2.5-8B-A1B streamed tiers (contains #9) | `inkling-stream` | PR #10, merged into `integration-next2` |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check, 3.9 GB wired + pickable | `inkling2` | PR #11, merged into `integration-next2` |
+| `engine-ab` | ModelStore (Application Support, offline-first), Xybrid LLM engine, engine A/B (A1–A7) | `integration` | PR #12, merged into `integration-next2` |
+| `integration-next2` | `integration` + #8 + #10 (#9) + #11 + #12, review fixes | `integration` | to fast-forward `integration` |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -49,7 +55,10 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | Xybrid speech | yes | no | +18 MB IPA; telemetry opted out |
 | QR pairing (`worker/pair.ps1`) | not yet | no | VisionKit scanner |
 | Inkling 2 Mini | in progress | no | see findings below |
+| Inkling expert streaming (O3) | yes | no | free sideload limit ≈5.3 GB → streamed 25%/19% are the only Inkling tiers that fit |
 | Memory harness + document tools | in progress | no | |
+| Model store (Application Support, local-first, migration, Downloaded models) | **compile-unverified** (`engine-ab`) | no | CI frozen until Dec 1 |
+| Xybrid LLM engine (opt-in) + engine A/B A1–A7 in Bench | **compile-unverified** (`engine-ab`) | no | CI frozen until Dec 1 |
 | Bench tab + receipts (`bench`) | see PR | no | worker `/receipts` + `list_receipts` tests pass |
 
 ## Findings
@@ -127,7 +136,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 |---|---|---|---|
 | O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | profiler built (`bench` PR); device run pending |
 | O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | todo; upstream candidate |
-| O3 | Inkling expert streaming / mmap of routed experts | fits 8–12 GB devices, frees RAM | research |
+| O3 | Inkling expert streaming (slot cache + `preadv`, no mmap) | fits the 5.3 GB free-sideload limit | implemented on `inkling-stream`, compiled; device run pending |
 | O4 | KV cache quantization / smaller prefill step on iPad | memory headroom, longer context | todo |
 | O5 | Speculative / MTP heads (DSpark for LFM2, Inkling MTP builds) | decode speed | not in scope for the Trainium work; allowed here, pending a decision |
 | O6 | Our own Inkling quant (REAP + mixed bits + DWQ) on a rented box | quality per GB | plan written |
@@ -141,6 +150,31 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: `integration-next2` — merged #8, #10 (with #9), #11, #12 on `integration`, review fixes
+- **Merge order:** `integration` → `inkling-kernels` (#8) → `lfm-moe-stream` (#10, brings #9) → `inkling-lamq` (#11) → `engine-ab` (#12). Every PR's behaviour is kept; the resolutions below are the decisions made.
+- **`MLXBackend` load path:** integration's unified path is unchanged (inline-in-caller load, draining, `MemoryBudget` gate, VLM routing, benchmark mode, epoch-tracked `loadLarge` with the token breadcrumb, `applyMemorySettings`). On top of it:
+  1. `performLoad`: engine-ab's `guard target.engine == .mlx` (wrongEngine), then #10's `Inkling2ExpertStreaming.options` (off unless the entry is streamed).
+  2. `case .llm where target.streamed == nil` → engine-ab's ModelStore load (`storeConfiguration(for:)` + `#hubDownloader(ModelStore.hub)`, local-first, `noteDownloaded`). `case .llm, .vlm` → `loadLarge(target, epoch:progress:)`, so streamed LFM tiers never take the plain HF `.llm` load.
+  3. `loadLarge`: streamed build → `StreamedModelStore.ensureDownloaded` then `LLMModelFactory`/`VLMModelFactory.loadContainer(from: directory)` by loader; lamq build → pinned-revision download with the `.npz` patterns, now through `#hubDownloader(ModelStore.hub)`; everything else → `VLMModelFactory` with `storeConfiguration` + `ModelStore.hub`. No `#hubDownloader()` or `#huggingFaceLoadModelContainer` is left in the app.
+  4. #8's `applyKernelOptions()` and the Inkling kernel self-check run inside `loadLarge` after the breadcrumb.
+  5. The load report stays inside `if isCurrent(loadEpoch)` and gains #10's streaming suffix; #10's unconditional `removeObject(pendingLoadKey)` is dropped (the token `defer` owns it).
+  6. `makeConversation`: greedy diagnostic temperature, then `applyMemorySettings`, then the streamed exact-prefill override. **`params.maxKVSize` is never set** (the Inkling rotating-cache bug).
+- **`ModelCatalog`:** `Entry` has the union of fields (`streamed`, `headroomGB`, `lamqRevision`, `engine`, `xybridSource`). `all` = LFM3, LFM2.5 1.2B, 350M, 8B-A1B, Qwen3 + `lfmStreamTiers` (75%, 62%) + `inklingTiers` (lamq 3.9 GB, DWQ, GPTQ small, GPTQ 3-bit, streamed 25/19/50/100%). `lamqBuilds` (3.9/4.7/5.4) stays for Settings; 4.7/5.4 stay out of `all` as #11 intends. `xybridEntries` stay out of `all` and are in `pickerEntries`.
+- **Settings:** `StreamingSection()` then `if deviceMemoryGB >= 14 { LamqSettingsSection() }`, plus engine-ab's model/engine UI.
+- **CI (`build.yml`):** worker tests run `test_jobworker test_mcp_bridge test_fleet test_models`; NumPy steps for the kernel reference, expert repack + trace sim and lamq; both Metal compile checks (`check_metal_kernels.py` and `check_lamq_metal_kernels.py`) as separate `always()` steps.
+- **`VENDORED.md`:** one list, each local patch once: 1 Package.swift, 2 patch A, 3 patch B, 4 patch C (streaming: MLXLMCommon `ExpertStreaming*.swift`, the Inkling typealias shim, Inkling2.swift, LFM2MoE.swift, Load.swift hooks), 5 patch D (lamq), then K1/K2 (kernels).
+- **`Inkling2.swift` (vendored):** lamq's split (`prepareCheckpoint` → lamq or `prepareConvertedCheckpoint`) keeps patch C's streaming branch inside `prepareConvertedCheckpoint`; `experts` is optional (lamq), so the trace path writes `mlp.experts?.stream`.
+- **Review fixes (2026-11-27b):**
+  - pr9 HIGH: expert slots install once, only for the language-model checkpoint (`expertSlotsInstalled`, and the checkpoint must hold `language_model.*` keys). The vision tower's on-demand `prepareCheckpoint` no longer reallocates slots or writes expert keys into the vision checkpoint.
+  - pr9 MED: no `fatalError` on expert I/O. `ExpertSlotCache.ensure` records a bind or read error on the runtime, releases the slots of that call's reads (a retry rereads them) and returns valid slot ids. `ExpertStreaming.takeError()` (new, public) is checked by `MLXConversation` after every step and at the end, and by `BenchmarkRunner` after its decode loop: the request fails with the I/O error, the app keeps running.
+  - pr9 LOW: `StreamedModelStore` skips the request when the `.part` already holds the whole file, discards a `.part` longer than the listing, and on HTTP 416 deletes the `.part` and retries once from byte 0. `experts.bin` is checked against `experts.json` (`file_bytes` and each layer's SHA-256 over its records) before it is renamed into place; a mismatch deletes it.
+  - pr12 LOW: fleet bench without `model_id` refuses a Xybrid chat selection (`BenchError.unknownModel`) instead of handing it to the MLX runner.
+  - pr12 LOW: `ModelStore.localSnapshot` requires `tokenizer_config.json`, and `noteDownloaded` (and the first-sight record) store every `*.json`/`*.jinja`/`*.safetensors` file of the snapshot, so a later offline load requires all of them, chat templates included. Not done: a fallback to the network when a `.directory` load fails.
+  - pr10/pr11/pr12 merge findings are the resolutions above.
+- **Also:** `BenchmarkRunner`'s own memory skip uses `residentGB` for streamed builds (it used `downloadGB`, 10.3 GB for streamed Inkling, so streamed tiers were always skipped); lamq's `headroomGB` and engine-ab's force-load are both kept there.
+- **Verified locally:** worker 68 tests OK (`test_jobworker test_mcp_bridge test_fleet test_models`); NumPy: kernel reference 9 OK, lamq 23 OK (1 skipped), expert repack + trace sim 15 OK.
+- **Not verified:** nothing has run on a device. The app is compile-checked by CI only (run in the PR / coordinator report).
 
 ### 2026-11-27: receipts round 2 (build `b74c0e2`, workload set w2, no background apps)
 Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, plugged in, thermal nominal throughout.
@@ -164,6 +198,30 @@ Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, 
   - lamq 3.9 GB Inkling, fully resident (PR #11);
   - LFM2.5-8B-A1B streamed or GGUF mmap (PR #10, engine-ab A2–A7);
   - Inkling streaming (PR #9).
+### 2026-11-27: lamq 3.9 GB wired into Inkling 2 and pickable (`inkling-lamq`, PR #11 update)
+- **Wiring (patch D, compile-unverified):**
+  - `steering.safetensors` is mapped onto PR #821's layout. It is a pure rename plus a `[C,1,K]`→`[C,K,1]` conv transpose (conv weights rounded to bf16 for PR #821's epilogue kernel). lamq's forward was compared with PR #821 term by term: no reparametrisation.
+  - The 6 attention linears per layer, the embedding and the head are `Linear`/`Embedding` subclasses with `[rows, 0]` placeholders, so the factory's strict update still checks every other parameter.
+  - Experts: `mlp.experts` is now optional. Decode runs fused matvecs plus PR #821's epilogue; prefill runs per-expert f16 tiles.
+  - `VLMModelFactory` hands the directory to the model when `manifest.json` is lamq.
+- **Verified locally:** `test_steering_map.py` ports the Swift map and PR #821's parameter tree. Against the real 3.9 GB steering header: 0 missing, 0 extra, 0 shape mismatches over 645 entries.
+- **App:**
+  - New entry `inkling2-mini-lamq-3.9`: pinned revision, `.npz` download, 0.9 GB headroom, 4K context. The memory gate and benchmark skip take a per-entry headroom: needs ≈ 4.75 GB of the ≈ 5.2 GB available.
+  - 4.7 and 5.4 GB are held for the PR #9 interface (spec §11).
+- **Not run:** compile, device self-check, chat, and a greedy-agreement gate against lamq's CPU reference.
+
+### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, [PR #11](https://github.com/apumutyala/mlx-agent-console/pull/11), depends on `inkling2`)
+- **Spec:** `docs/LAMQ-FORMAT-SPEC.md` covers trellis `ht*`/`rtr*` (12-bit sliding state over a reversed little-endian row bitstream, ht = Fibonacci hash into 512/1024-entry f16 LUTs), Lloyd-Max `lm6`/`lm8`, NVFP4, Kronecker Sylvester×Paley RHT with f16 "signs", 128-row-group expert maps, bucketed embed/head, and steering tensors.
+  - NVFP4 passthrough ("23/192 hot buckets") is only in the 8.9/11.2 GB builds. The 3.9/4.7/5.4 GB builds are pure trellis + Lloyd-Max.
+- **Verified:** our NumPy decoder (`ios/tools/lamq/lamq_ref.py`) == LookAtMyQuant's own torch decoders (CPU), **bit-identical on 532 tensors**: 5.4 GB layers 0 and 7, every linear and all 256 expert sides each, plus 8 embed buckets. Digests are in `lamq_digests.json`. 19 NumPy tests pass, including the Metal index-math emulation.
+- **Written, compile-unverified (CI freeze):**
+  - MLXFast kernels: fused trellis/LM matvec for decode, f16 dequant tiles for prefill.
+  - STORED-npz `pread` loader, packed linear/expert/embed/head classes.
+  - On-device self-check: Settings › Inkling 2 Mini · LookAtMyQuant downloads layer 7 (~190 MB) and compares SHA-256 digests.
+  - CI steps: the NumPy tests, and `check_lamq_metal_kernels.py --compile` (156 instantiations).
+- **Not done:** wiring into `Inkling2.swift`. Steering uses HF transformers names, not PR #821's layout, so a name/reparametrisation map is needed. The lamq tiers are therefore listed in Settings with memory plans but are not pickable.
+- **Memory (estimates):** 3.9 GB build fits resident (~4.7 GB at 4K). 4.7 GB needs ~0.6 GB streamed and 5.4 GB ~1.3 GB, via the PR #9 slot cache with per-format slab records (to agree with PR #9).
+- **Licences:** the lamq runtime is MIT (no code copied; notice kept). The weights declare no licence; the base model is Apache-2.0. Weights are downloaded on device only, never redistributed.
 
 ### 2026-11-27 (morning): receipts round 1, polling incident, engine research
 - **Receipts round 1:** see Findings. The app's memory limit is about 5.3 GB, so resident Inkling and the 8B MoE (4-bit) don't fit.
@@ -184,6 +242,31 @@ Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, 
     - A bounded slot pool constrains prefill (micro-batch × top-k ≤ slots).
     - LFM2.5-8B-A1B MLX 3-bit is estimated at 80–150 tok/s.
     - LookAtMyQuant 5.4 GB (~1.65 bpw) is a future low-bit route.
+### 2026-11-27: `engine-ab`, model storage + Xybrid LLM engine + engine A/B (A1–A7), compile-unverified
+- **Base:** `integration-next` (b74c0e2) + `integration` (research doc, CI budget rule). PR into `integration`. **No CI run** (budget freeze): every API was checked against its source instead (Xybrid v0.21.0 at 491da33d; swift-huggingface 0.13.0 at f0a0cb43; the vendored mlx-swift-lm macros and `ModelFactory`).
+- **Storage (research §5, critique C6):**
+  - `Inference/ModelStore.swift`: one explicit `HubCache(cacheDirectory: Application Support/Models/huggingface/hub)` + `HubClient(cache:)`; every MLX download goes through `#hubDownloader(ModelStore.hub)` (chat LLM and VLM paths, memory embedder). `Models/` and `Xybrid/` are excluded from iCloud backup.
+  - One-time migration at launch: `Library/Caches/huggingface/hub` is moved (one rename when the destination is new; per-repo moves when both exist, duplicates left in place, nothing deleted). The file count and byte totals are compared before and after, and the report shows in Settings › Downloaded models.
+  - Local-first: when `refs/main` → snapshot has config.json, a tokenizer and every shard from the index, with sizes matching `Models/manifest.json`, the load uses `cfg.id = .directory(snapshot)`. The downloader is never called for the weights, so a load works in airplane mode with no network wait, and registry settings such as `toolCallFormat` are kept.
+  - Bench fix: `weight_files_bytes` now sums the symlink targets (the old 76 was the link length). Receipts gain `storage` (local copy before, bytes on disk before/after, backup flag).
+  - Every receipt records `identity`: the bundle id, a container path hash and a **container marker id**, a random id written to Application Support on first launch. iOS may move the container path on an update, so the marker, not the hash, proves persistence across Sideloadly reinstalls.
+  - Settings › Downloaded models lists MLX snapshots, GGUFs and the Xybrid SDK cache, with files, real sizes, free space and a confirmed delete. The selected model can't be deleted, and nothing can be deleted during a benchmark.
+  - Xybrid speech cache: it is already in Application Support (not purgeable); now excluded from backup. `initSdkCacheDir` is never called.
+- **Xybrid LLM engine (research §2):**
+  - `Inference/XybridLLMBackend.swift` covers a registry model (`lfm2.5-1.2b-instruct`, Q4_K_M) or a GGUF downloaded to `Models/gguf/<entry>/<file>` (exact size checked, moved into place only when complete) and loaded with `ModelLoader.fromModelFile`, with no network.
+  - Chat streams through `runStreamWithContext` + `XybridConversationContext` (turns pushed after the run, per Xybrid's executor contract), with native tools (`toolResults` continuation). Its limits: one tool round is rebuilt per continuation, and tool exchanges are not kept in later history.
+  - `Inference/EngineRouter.swift` is the app's `ModelBackend`. MLX is the default. `.xybrid` catalog entries are opt-in in the picker, labelled “· Xybrid”. Only one engine holds weights: an MLX load unloads Xybrid first, and selecting a Xybrid entry makes MLX drop its container. Loads stay under `GPUGate`. MLX-only code (LoRA, token counts, fleet bench) reaches MLX through `backend.mlxBackend`.
+  - Catalog (exact HF sizes): `LFM2.5-8B-A1B` UD-Q3_K_XL 4,003,114,592 B; UD-IQ4_XS 4,264,996,448 B; UD-IQ3_XXS 3,272,339,040 B (unsloth); Q4_0 4,844,678,368 B (LiquidAI, mmap canary). They are not in `ModelCatalog.all`, so MLX benchmark runs never try them.
+- **Engine A/B (Bench tab › “Engine A/B: MLX vs Xybrid”):**
+  - Steps: A1-mlx, A1-xybrid, A2, A3, A3-iq3xxs, A4 (a `skipped` receipt until an MLX 3-bit conversion exists, T4), A6, A7, A5. They use workload `ab-256`: the same text, greedy, 256 tokens, 5 reps, median.
+  - Every receipt has `engine`, `ab_step` and a `memory_probe`: `phys_footprint` peak over load + reps, `os_proc_available_memory` before/after load, and `MTLDevice.recommendedMaxWorkingSetSize` / `currentAllocatedSize` before/after/max.
+  - A **jetsam breadcrumb** is set before every benchmark load (MLX and Xybrid) and cleared when the run ends. If it is found at the next launch, the run is saved as `status: killed`, `jetsam_suspected: true`, with the last phase and memory readings.
+  - A5 = MLX 4-bit 8B with **force try** (Bench only), which bypasses the memory skip and records the bypass in `warnings`.
+  - A7 = A6 with `GGML_METAL_NO_RESIDENCY=1`. It is **experimental** and **armed for the next launch only**, because ggml reads the variable when it creates its Metal device; A6 refuses to run in that launch.
+  - The Xybrid side feeds the text through the GGUF chat template (there is no raw-token API) and may stop at end-of-turn. Receipts record the generated count, and a warning when it is under 256.
+- **Worker:** the `list_receipts` summary carries `engine`, `ab_step` and `jetsam_suspected`. +1 test; 60 worker tests pass locally.
+- **Status:** not compiled, nothing on a device. Unverified: whether swift-huggingface resolves to a version with `HubCache(cacheDirectory:)` (≥ 0.13 has it); whether `MTLDevice.currentAllocatedSize` from our own `MTLCreateSystemDefaultDevice()` reflects llama.cpp's and MLX's buffers; whether a free Apple ID can map a 4.8 GB file (critique C4, extended virtual addressing); Xybrid `tokens_in` metadata for text runs.
+
 ### 2026-11-27: `integration-next` — merged #7 + #2 on top of #6: unified load path
 - **What:** `integration-next` = `integration` (with #6 `fix-node`) + PR #7 `bench` + PR #2 `inkling2`, merged in that order. All three PRs' behaviours are kept; the decisions made in conflict resolution are below.
 - **One load path (`MLXBackend.load`):**
@@ -219,6 +302,21 @@ Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, 
   - Bodies over 256 KB are refused unread, and the connection is closed (POST as well as PUT).
   - `list_receipts` keeps its untrusted-data note first and keeps the output under the text budget as valid JSON.
 - **`w2`:** an untimed warm-up decode at each workload's own prompt length, because the first device receipts (w1) showed rep 1 of the 1K and 4K workloads paying Metal compile time, for example LFM3 1K prefill at 864 vs 3341 tok/s. A 10 s idle settle now runs before the footprint baseline. Prompts are unchanged.
+### 2026-11-27 (later): O2, 2/3-bit fused expert kernels (`inkling-kernels`)
+- **Change:** `inkling2_unit_dot` reads 2-bit (16 codes per `uint`) and 3-bit (8 codes per 3 bytes) MLX affine weights; `supportsFusedDecode` accepts affine 2/3/4/8. The default DWQ build (gate/up 2-bit ×22 + 3-bit ×2 layers, down 2-bit ×14 + 3-bit ×10, all group 64; read from its config.json) now decodes through the fused kernels instead of `gatherQuantizedMM` + epilogue. Signatures and indexing unchanged (safe for `inkling-stream`'s slot tensors).
+- **Packing verified** against mlx@36969c0 (the mlx in mlx-swift 0.33.0): CPU `quantize` packs 3-bit as 8 values into 24 bits little-endian (`bytes_per_pack` 3), Metal `qdot` reads the same; 2-bit four per byte.
+- **Verified locally:** `ios/tools/kernels/test_inkling2_expert_ref.py` (numpy): hand-packed bytes, a port of MLX `quantize`, and a line-by-line port of both kernels against the dense math for gate/up×down bits {2,3}×{2,3}, 4, 8 and groups 64/128; a mutated 3-bit offset fails it. Runs in CI (`worker-tests`).
+- **New CI step:** `ios/tools/kernels/check_metal_kernels.py` regenerates the Metal source MLX builds for `MLXFast.metalKernel` (header, signature, template instantiation) and compiles it with `xcrun metal` against MLX's `utils.h`: 122 instantiations of the three expert kernels. Add specs to cover other runtime kernels.
+- **Device self-check:** Settings → Memory → "Inkling kernel self-check on load" runs fused vs unfused on a random Mini-shaped layer for each format before the weights load and shows max |Δ| per case.
+- **Review fixes (6 findings):** the A/B switch is lock-backed and set only at model load, so one generation can't mix paths; self-check peak is derived in one place (`peakBytes()`, 223 MB) and the app skips it below that + 256 MB; the NumPy port pins the Metal source's SHA-256 and fails CI when the kernels change; patches relabelled K1/K2.
+- **PR / CI:** [PR #8](https://github.com/apumutyala/mlx-agent-console/pull/8) (depends on #2); CI green, run 45956519987, and after the review fixes run 45959456792: numpy 8 OK, app build OK, Metal check 122/122 compiled against MLX `utils.h`.
+- **Not verified:** nothing ran on the iPad: speed and greedy equivalence need the A/B in the PR. The app limit on the user's iPad is ~5.3 GB, so the A/B runs on the streamed tiers, which use the same kernels.
+### 2026-11-27 (expert streaming)
+- **Inkling SSD expert streaming (`inkling-stream` → PR into `integration`, depends on #2):**
+  - `tools/expert_repack.py` repacks a PR-loadable MLX build into core shards + `experts.bin` (16 KiB-aligned per-expert records) + `experts.json`; byte-exact, streamed, stdlib only; tests pass locally. Plan on the real DWQ header: experts 8.239 GB, core 1.357 GB text (+0.637 GB vision), 64.36 MB per slot across 24 layers.
+  - Vendored patch C: per-layer slot cache inside the expert tensors (decayed-use eviction, in-call protection, remap; identity at 100%), `F_NOCACHE` `preadv` into the MLXArray's own buffer (pointer from `asData(.noCopy)` + a load-time GPU read-back probe; no mlx-swift patch), chunked expert-major prefill, counters, optional JSONL routing trace. `Load.swift` hook skips stacked experts.
+  - App: streamed tiers 19% (24 slots) / 25% (32) / 50% / 100%; resumable download from the worker's new read-only `GET /models/<name>/<file>` (Range); Settings toggles for trace, greedy and exact prefill (3-token steps → all streamed tiers bit-identical, the on-device gate); `BenchMetricsRegistry` `inkling_stream.*` for receipts. `tools/expert_trace_sim.py` replays a trace (decayed/LRU/oracle hit rates).
+  - Budget for the free-sideload limit (~5.3 GB, device receipt): 32 slots ≈ 4.1 GB at 4K context, the largest that fits under 4.6 GB. Compiled only (CI 45956320062); nothing ran on the iPad.
 
 ### 2026-11-27
 - **Inkling 2 (`inkling2` → PR into `integration`):** vendored aleroot/mlx-swift-lm@5507b3b (PR #821) under `ios/Vendor/mlx-swift-lm` without tests; Fix A (per-layer quantization keys renamed with the `model.` strip) and a DSpark-namespace exclusion. Fix B (mlx-vlm layout remap) deferred: that layout renames/reparametrizes ~30 tensors per layer (`q_scale`/`rel_scale`/`rel_proj`, `controllers.*`, `message_queries`) and LayerFit-2bit mixes gate 3-bit with up 2-bit, so gate/up can't be fused losslessly into `gate_up_proj`; not verifiable without weights.

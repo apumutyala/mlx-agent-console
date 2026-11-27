@@ -100,6 +100,8 @@ def summarize(name: str, r: dict) -> dict:
         "model": {k: _clip(model.get(k), 128) for k in ("id", "repo", "display_name") if k in model},
         "device": {k: _clip(device.get(k), 64) for k in ("machine", "os", "physical_memory_bytes") if k in device},
         "app_git_sha": _clip(r.get("app_git_sha"), 40), "workload_set": _clip(r.get("workload_set"), 16),
+        "engine": _clip(r.get("engine"), 16), "ab_step": _clip(r.get("ab_step"), 16),
+        "jetsam_suspected": _clip(r.get("jetsam_suspected")),
         "load": {k: _clip(load.get(k)) for k in ("first_load_s", "warm_load_s", "download_observed")
                  if k in load},
         "workloads": workloads,

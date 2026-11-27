@@ -37,11 +37,38 @@ enum ModelCatalog {
         var prefillStepSize: Int? = nil
         /// Chat-template `reasoning_effort` (Inkling: none/minimal/low/medium/high/xhigh/max).
         var reasoningEffort: String? = nil
+        /// Set for an SSD-streamed build: the routed experts stay in `experts.bin` and only a
+        /// fraction of them is resident. Downloaded from `StreamedModelStore`, not Hugging Face.
+        var streamed: StreamedBuild? = nil
+        /// Memory kept free beyond `residentGB`, in GB; nil = `MemoryBudget.headroomBytes` (1.5 GiB).
+        var headroomGB: Double? = nil
+        /// LookAtMyQuant packed build: the pinned Hugging Face revision. Its `.npz` files are
+        /// downloaded too, and MLXVLM's patch D loads it (docs/LAMQ-FORMAT-SPEC.md).
+        var lamqRevision: String? = nil
+
+        /// Inference engine. `.xybrid` entries run on Xybrid's llama.cpp (Metal) through
+        /// `XybridLLMBackend`; everything else is MLX.
+        var engine: Engine = .mlx
+        /// Where an `.xybrid` entry's weights come from (nil for MLX entries).
+        var xybridSource: XybridSource? = nil
+
+        /// "MLX" / "Xybrid", shown next to the model in the picker.
+        var engineLabel: String { engine == .mlx ? "MLX" : "Xybrid" }
 
         var sizeLabel: String {
             downloadGB < 1 ? "\(Int((downloadGB * 1000).rounded())) MB" : String(format: "%.1f GB", downloadGB)
         }
         var isSupportedOnThisDevice: Bool { ModelCatalog.deviceMemoryGB >= minimumMemoryGB }
+    }
+
+    enum Engine: String, Hashable, Sendable, Codable { case mlx, xybrid }
+
+    enum XybridSource: Hashable, Sendable {
+        /// A Xybrid registry model id (downloaded into the SDK's cache, Application Support/Xybrid).
+        case registry(String)
+        /// A GGUF file from a Hugging Face repo, downloaded into
+        /// `ModelStore.ggufURL(entryID:file:)` and loaded with `ModelLoader.fromModelFile` (no network).
+        case gguf(repo: String, file: String, bytes: Int64)
     }
 
     static let lfm3_1_7b = Entry(
@@ -76,9 +103,9 @@ enum ModelCatalog {
 
     /// Shared settings for every Inkling 2 Mini build.
     static func inkling(id: String, name: String, repo: String, downloadGB: Double, residentGB: Double,
-                        note: String) -> Entry {
+                        note: String, minimumMemoryGB: Double = 14) -> Entry {
         Entry(id: id, displayName: name, repo: repo, downloadGB: downloadGB, note: note,
-              minimumMemoryGB: 14, thinks: true, temperature: 0.6, loader: .vlm,
+              minimumMemoryGB: minimumMemoryGB, thinks: true, temperature: 0.6, loader: .vlm,
               residentGB: residentGB, contextTokens: 8192, prefillStepSize: 512, reasoningEffort: "low")
     }
 
@@ -100,13 +127,233 @@ enum ModelCatalog {
         repo: "roman220220/Inkling-2-Mini-gptq-mlx-jang", downloadGB: 13.5, residentGB: 12.49,
         note: "Highest-quality Inkling build that might fit; needs a very high per-app memory limit.")
 
-    static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3]
+    // MARK: Inkling 2 Mini, LookAtMyQuant trellis builds (docs/LAMQ-FORMAT-SPEC.md)
+    //
+    // The 3.9 GB build loads fully resident through MLXVLM patch D and is in the picker
+    // (`inkling2MiniLamq39`). The 4.7 / 5.4 GB builds need ~0.6 / ~1.3 GB of experts streamed
+    // (PR #9's slot cache, interface not agreed yet): Settings lists them with their memory plan
+    // only, never in `all`.
 
-    static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
+    /// Resident footprint beyond the packed files, GB: KV ~0.29 at 4K, prefill tiles ~0.2,
+    /// Metal/runtime/app ~0.3-0.4 (spec §10). An estimate until the first device receipt.
+    static let lamqHeadroomGB = 0.9
+
+    /// 1.18 bits/param, 3.85 GB of files, fully resident (~4.75 GB with `lamqHeadroomGB`).
+    /// Card: GSM8K 86.5% (BF16 94.0), HumanEval 59.2% (BF16 89.6), 6-class chat KL 0.233.
+    static let inkling2MiniLamq39 = Entry(
+        id: "inkling2-mini-lamq-3.9", displayName: "Inkling 2 Mini · LookAtMyQuant 1.2-bit",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-3.9GB", downloadGB: 3.85,
+        note: "Thinking Machines' 26B MoE in 3.9 GB (trellis-coded). Experimental: new Metal kernels; "
+            + "run Settings › LookAtMyQuant self-check first.",
+        minimumMemoryGB: 14, thinks: true, temperature: 0.6, loader: .vlm,
+        residentGB: 3.85, contextTokens: 4096, prefillStepSize: 512, reasoningEffort: "low",
+        headroomGB: lamqHeadroomGB, lamqRevision: "fbee46a43565d8efac84e89edc196add5f28b254")
+
+    struct LamqBuild: Identifiable, Hashable, Sendable {
+        enum Plan: Hashable, Sendable {
+            /// Everything resident, with this context budget.
+            case resident(contextTokens: Int)
+            /// Experts beyond the budget stream from the downloaded files (PR #9 slot cache; not built).
+            case streamed(streamGB: Double)
+        }
+        let id: String
+        let name: String
+        let repo: String
+        /// Hugging Face revision the spec, digests and sizes were taken from.
+        let revision: String
+        /// All files (weights + steering + tokenizer), GB, from the HF tree API.
+        let totalGB: Double
+        let plan: Plan
+        /// Card results (greedy, `max_new_tokens` 1,536, no thinking cap): GSM8K 200 / HumanEval 164.
+        let card: String
+
+        /// Beyond the weights (spec §10): an estimate, not measured.
+        static var overheadGB: Double { ModelCatalog.lamqHeadroomGB }
+
+        var residentNeedGB: Double { totalGB + Self.overheadGB }
+    }
+
+    static let lamq39 = LamqBuild(
+        id: "inkling2-mini-lamq-3.9", name: "Inkling 2 Mini · LookAtMyQuant 1.18 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-3.9GB",
+        revision: "fbee46a43565d8efac84e89edc196add5f28b254", totalGB: 3.85,
+        plan: .resident(contextTokens: 4096), card: "GSM8K 86.5% · HumanEval 59.2% (BF16: 94.0 / 89.6)")
+    static let lamq47 = LamqBuild(
+        id: "inkling2-mini-lamq-4.7", name: "Inkling 2 Mini · LookAtMyQuant 1.45 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-4.7GB",
+        revision: "d865ec500e2e88da2240ef41a15eb892cb3f1a2f", totalGB: 4.72,
+        plan: .streamed(streamGB: 0.6), card: "GSM8K 90.5% · HumanEval 67.1%")
+    static let lamq54 = LamqBuild(
+        id: "inkling2-mini-lamq-5.4", name: "Inkling 2 Mini · LookAtMyQuant 1.65 bpp",
+        repo: "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-5.4GB",
+        revision: "d470c9c15fdccf7380c401c7fd72e291d92c6b0d", totalGB: 5.38,
+        plan: .streamed(streamGB: 1.3), card: "GSM8K 92.5% · HumanEval 76.8%")
+
+    static let lamqBuilds: [LamqBuild] = [lamq39, lamq47, lamq54]
+
+    // MARK: Inkling 2 Mini, SSD expert streaming
+    //
+    // The same DWQ weights, repacked offline by `tools/expert_repack.py` into core shards plus
+    // `experts.bin` (layer-major 16 KiB-aligned expert records) and `experts.json`. The repack is
+    // byte-exact, so quality equals the resident DWQ tier; only speed and memory change. Each layer
+    // keeps `residentFraction` of its 128 experts in memory and reads misses from flash.
+    // Sizes from the DWQ safetensors headers: text core 1.357 GB, routed experts 8.239 GB,
+    // experts.bin 8.259 GB (record padding), vision 0.637 GB (loads on the first image).
+
+    /// An SSD-streamed build: where it is hosted and how much of it stays resident.
+    struct StreamedBuild: Hashable, Sendable {
+        /// The directory name under the streamed-models URL (the repack output directory).
+        let name: String
+        /// Fraction of each layer's experts kept in memory (`S = round(f * 128)` slots).
+        let residentFraction: Double
+    }
+
+    static let dwqStreamName = "Inkling-2-Mini-MLX-3.1bpw-DWQ-stream"
+    static let dwqTextCoreGB = 1.357
+    static let dwqExpertsGB = 8.239
+
+    static func inklingStreamed(id: String, name: String, fraction: Double, minimumMemoryGB: Double,
+                                note: String) -> Entry {
+        var entry = inkling(
+            id: id, name: name, repo: "LocallyInferred/Inkling-2-Mini-MLX-3.1bpw-DWQ",
+            downloadGB: 10.3, residentGB: dwqTextCoreGB + fraction * dwqExpertsGB, note: note,
+            minimumMemoryGB: minimumMemoryGB)
+        entry.streamed = StreamedBuild(name: dwqStreamName, residentFraction: fraction)
+        return entry
+    }
+
+    // Budget on the free-sideload iPad (device receipt 2026-11-27): per-app limit ≈ 5.3–5.5 GB,
+    // target footprint ≤ 4.6 GB. One slot across all 24 layers costs 64.36 MB. With the 1.36 GB core,
+    // KV ≈ 0.2 GB at 4K tokens, prefill scratch ≈ 0.25 GB at 256-token steps and ≈ 0.2 GB runtime,
+    // 32 slots (2.06 GB) come to ≈ 4.1 GB and 24 slots (1.54 GB) to ≈ 3.6 GB. 8K context adds
+    // ≈ 0.2 GB, which still fits at 32 slots (≈ 4.3 GB).
+
+    /// 32 of 128 experts per layer resident (3.42 GB weights): the largest tier that fits the
+    /// ~5.3 GB free-sideload limit with headroom. 4K context keeps KV small; 512-token prefill steps
+    /// halve TTFT vs 256 (a streamed prefill re-reads ~96 experts per visit per step regardless of
+    /// the step length) for ~0.1 GB more attention scratch.
+    static let inkling2MiniStream25: Entry = {
+        var e = inklingStreamed(
+            id: "inkling2-mini-dwq3.1-stream25", name: "Inkling 2 Mini · streamed 25%", fraction: 0.25,
+            minimumMemoryGB: 7,
+            note: "The 3.1-bit DWQ build with 25% of experts in memory, the rest read from storage. "
+                + "Fits the default per-app memory limit; experimental.")
+        e.contextTokens = 4096
+        e.prefillStepSize = 512
+        return e
+    }()
+    /// 24 of 128 (2.90 GB weights): fallback if the 25% tier is killed for memory.
+    static let inkling2MiniStream19: Entry = {
+        var e = inklingStreamed(
+            id: "inkling2-mini-dwq3.1-stream19", name: "Inkling 2 Mini · streamed 19%", fraction: 0.1875,
+            minimumMemoryGB: 7,
+            note: "Like the 25% tier with fewer experts in memory: ~0.5 GB smaller, slower.")
+        e.contextTokens = 4096
+        e.prefillStepSize = 512
+        return e
+    }()
+    /// 64 of 128 resident: ~5.5 GB weights. Needs the increased-memory-limit entitlement.
+    static let inkling2MiniStream50 = inklingStreamed(
+        id: "inkling2-mini-dwq3.1-stream50", name: "Inkling 2 Mini · streamed 50%", fraction: 0.5,
+        minimumMemoryGB: 7,
+        note: "The 3.1-bit DWQ build with half of its experts in memory. Experimental.")
+    /// Every expert resident, through the streaming path: the exactness gate against the
+    /// resident DWQ tier (must greedy-match it). Same memory as the resident build.
+    static let inkling2MiniStream100 = inklingStreamed(
+        id: "inkling2-mini-dwq3.1-stream100", name: "Inkling 2 Mini · streamed 100% (check)",
+        fraction: 1.0, minimumMemoryGB: 14,
+        note: "Diagnostic: the streamed build with every expert resident. Output must match the "
+            + "resident DWQ build exactly.")
+
+    static let inklingTiers: [Entry] = [inkling2MiniLamq39, inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3,
+                                        inkling2MiniStream25, inkling2MiniStream19, inkling2MiniStream50,
+                                        inkling2MiniStream100]
+
+    // MARK: LFM2.5-8B-A1B, SSD expert streaming
+    //
+    // `LiquidAI/LFM2.5-8B-A1B-MLX-4bit` @ 2e92b640, repacked by tools/expert_repack.py (switch_glu
+    // layout). From its header: 22 MoE layers × 32 experts of 6.19 MB (4-bit, group 64) = 4.360 GB of
+    // experts, 0.474 GB everything else. One slot across the 22 layers costs 136.25 MB. Footprint ≈
+    // core + S × 136 MB + KV (hybrid: 6 attention layers, ~0.1 GB at 8K) + ~0.3 GB prefill scratch at
+    // 256-token steps + ~0.2 GB runtime: S = 20 ≈ 3.8 GB, S = 24 ≈ 4.3 GB (the 4.6 GB target).
+
+    static let lfm8bStreamName = "LFM2.5-8B-A1B-MLX-4bit-stream"
+    static let lfm8bCoreGB = 0.474
+    static let lfm8bExpertsGB = 4.360
+
+    static func lfm8bStreamed(id: String, name: String, fraction: Double, note: String) -> Entry {
+        var e = Entry(
+            id: id, displayName: name, repo: "LiquidAI/LFM2.5-8B-A1B-MLX-4bit", downloadGB: 4.85, note: note,
+            minimumMemoryGB: 7, thinks: true, temperature: 0.2, loader: .llm,
+            residentGB: lfm8bCoreGB + fraction * lfm8bExpertsGB, contextTokens: 8192, prefillStepSize: 256)
+        e.streamed = StreamedBuild(name: lfm8bStreamName, residentFraction: fraction)
+        return e
+    }
+
+    /// 24 of 32 experts per layer resident (3.74 GB weights).
+    static let lfm25_8b_a1b_stream75 = lfm8bStreamed(
+        id: "lfm2.5-8b-a1b-stream75", name: "LFM2.5 8B-A1B (MoE) · streamed 75%", fraction: 0.75,
+        note: "The 8B MoE with three quarters of its experts in memory and the rest read from storage. "
+            + "Fits the default per-app memory limit; experimental.")
+    /// 20 of 32 (3.20 GB weights): more headroom, more misses.
+    static let lfm25_8b_a1b_stream62 = lfm8bStreamed(
+        id: "lfm2.5-8b-a1b-stream62", name: "LFM2.5 8B-A1B (MoE) · streamed 62%", fraction: 0.625,
+        note: "Like the 75% tier with fewer experts in memory: ~0.5 GB smaller, slower.")
+
+    static let lfmStreamTiers: [Entry] = [lfm25_8b_a1b_stream75, lfm25_8b_a1b_stream62]
+
+    static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b]
+        + lfmStreamTiers + inklingTiers
+
+    // MARK: Xybrid engine (llama.cpp + Metal, GGUF) — opt-in, for the on-device A/B vs MLX
+    //
+    // Not in `all`: MLX benchmark runs iterate `all`, and these can't load through MLX. They
+    // are in `pickerEntries` (chat, opt-in) and run in the Bench tab's engine A/B.
+    // Sizes are the exact Hugging Face file sizes (tree API, 2026-11-27).
+
+    static func xybridGGUF(id: String, name: String, repo: String, file: String, bytes: Int64,
+                           note: String) -> Entry {
+        Entry(id: id, displayName: name, repo: repo, downloadGB: Double(bytes) / 1e9, note: note,
+              minimumMemoryGB: 14, thinks: true, temperature: 0.2,
+              engine: .xybrid, xybridSource: .gguf(repo: repo, file: file, bytes: bytes))
+    }
+
+    /// A1: Xybrid registry LFM2.5 1.2B Instruct (Q4_K_M GGUF, LiquidAI/LFM2.5-1.2B-Instruct-GGUF,
+    /// 730,895,168 bytes) against MLX 4-bit `lfm25_1_2b`.
+    static let xyLFM25_1_2b = Entry(
+        id: "xybrid-lfm2.5-1.2b-instruct", displayName: "LFM2.5 1.2B Instruct", repo: "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+        downloadGB: 0.73, note: "Xybrid engine (llama.cpp, Q4_K_M). Experimental; for comparing against MLX.",
+        minimumMemoryGB: 0, thinks: false, temperature: 0.3,
+        engine: .xybrid, xybridSource: .registry("lfm2.5-1.2b-instruct"))
+    /// A2.
+    static let xyLFM25_8b_Q3KXL = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-q3_k_xl", name: "LFM2.5 8B-A1B · UD-Q3_K_XL",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-Q3_K_XL.gguf", bytes: 4_003_114_592,
+        note: "Xybrid engine, 3-bit GGUF (memory-mapped). Experimental.")
+    /// A3.
+    static let xyLFM25_8b_IQ4XS = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-iq4_xs", name: "LFM2.5 8B-A1B · UD-IQ4_XS",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-IQ4_XS.gguf", bytes: 4_264_996_448,
+        note: "Xybrid engine, 4-bit i-quant GGUF (memory-mapped). Experimental.")
+    /// Smallest 8B point (critique C3).
+    static let xyLFM25_8b_IQ3XXS = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-iq3_xxs", name: "LFM2.5 8B-A1B · UD-IQ3_XXS",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-IQ3_XXS.gguf", bytes: 3_272_339_040,
+        note: "Xybrid engine, smallest 8B GGUF (3.27 GB). Experimental.")
+    /// A6/A7 mmap canary: bigger than what MLX can hold resident under the ~5.3 GB limit.
+    static let xyLFM25_8b_Q4_0 = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-q4_0", name: "LFM2.5 8B-A1B · Q4_0",
+        repo: "LiquidAI/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-Q4_0.gguf", bytes: 4_844_678_368,
+        note: "Xybrid engine, 4.84 GB GGUF: memory-limit canary, may be killed by iOS. Experimental.")
+
+    static let xybridEntries: [Entry] = [xyLFM25_1_2b, xyLFM25_8b_IQ3XXS, xyLFM25_8b_Q3KXL, xyLFM25_8b_IQ4XS, xyLFM25_8b_Q4_0]
+
+    /// Everything the model picker offers: MLX entries first, then the opt-in Xybrid ones.
+    static var pickerEntries: [Entry] { all + xybridEntries }
     static let defaultEntry = lfm3_1_7b
 
     /// Entries this device can run, in display order.
-    static var available: [Entry] { all.filter(\.isSupportedOnThisDevice) }
+    static var available: [Entry] { pickerEntries.filter(\.isSupportedOnThisDevice) }
 
     /// Physical RAM in GB (a "16 GB" iPad reports slightly under 16).
     static var deviceMemoryGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
@@ -123,5 +370,5 @@ enum ModelCatalog {
         set { UserDefaults.standard.set(newValue.id, forKey: storageKey) }
     }
 
-    static func entry(id: String) -> Entry? { all.first { $0.id == id } }
+    static func entry(id: String) -> Entry? { pickerEntries.first { $0.id == id } }
 }

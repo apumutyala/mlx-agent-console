@@ -42,11 +42,27 @@ enum BenchWorkloads {
 
     static let all: [Workload] = [short, oneK, fourK]
 
+    /// Engine A/B (research §2): the same text on both engines, greedy, 256 output tokens.
+    /// MLX feeds it as raw token ids like every workload here; Xybrid feeds it as a user
+    /// message through the GGUF's chat template (Xybrid's Swift API has no raw-token path),
+    /// so its prompt is a few template tokens longer and it may stop early at end-of-turn —
+    /// Xybrid receipts record the generated token count per rep. The prompt asks for a long
+    /// answer so 256 tokens are normally reached. Not in `all`: standard runs are unchanged.
+    static let engineAB = Workload(
+        id: "ab-256", version: 1, description: "engine A/B: short prompt → 256 tokens",
+        prompt: .short("Write a detailed, multi-paragraph guide to maintaining a bicycle: the chain, gears, "
+                       + "brakes, tyres and bearings. For each part explain what wears out, the warning signs, "
+                       + "the tools needed and the steps to fix it. Use at least 600 words."),
+        maxTokens: 256)
+
+    /// Workloads selectable by id but not part of the default set.
+    static let extra: [Workload] = [engineAB]
+
     static func workloads(ids: [String]?) throws -> [Workload] {
         guard let ids, !ids.isEmpty else { return all }
         return try ids.map { id in
-            guard let w = all.first(where: { $0.id == id }) else {
-                throw BenchError.unknownWorkload(id, known: all.map(\.id))
+            guard let w = (all + extra).first(where: { $0.id == id }) else {
+                throw BenchError.unknownWorkload(id, known: (all + extra).map(\.id))
             }
             return w
         }

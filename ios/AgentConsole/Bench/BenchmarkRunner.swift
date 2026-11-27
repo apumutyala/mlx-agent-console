@@ -18,6 +18,11 @@ import UIKit
 /// `GenerateCompletionInfo.promptTime` / `.tokensPerSecond`.
 struct BenchmarkRunner: Sendable {
     let backend: MLXBackend
+    /// "Force try" (Bench engine A/B only): load even when the memory check says the model
+    /// won't fit, with a jetsam breadcrumb so a kill is reported on the next launch.
+    var forceLoad = false
+    /// Engine A/B step (A1–A7) this run belongs to, recorded in the receipt.
+    var abStep: String? = nil
 
     static let seed: UInt64 = 1234
     static let warmupTokens = 8
@@ -57,7 +62,13 @@ struct BenchmarkRunner: Sendable {
         let reps = min(max(repetitions, 1), 10)
         let envBefore = await Self.environmentNow()
         var receipt = await Self.skeleton(entry: entry, reps: reps, env: envBefore)
+        receipt.engine = "mlx"
+        receipt.abStep = abStep
+        receipt.identity = .current
+        if forceLoad { receipt.forced = true }
+        let crumbed = CrumbFlag()
         func finish(_ status: String, error: String? = nil, skip: String? = nil) async -> BenchReceipt {
+            if crumbed.value { JetsamBreadcrumb.clear() }
             let after = await Self.environmentNow()
             receipt.status = status
             receipt.error = error
@@ -108,12 +119,31 @@ struct BenchmarkRunner: Sendable {
                 model: entry.displayName, neededBytes: needed, budgetBytes: budget,
                 stillHeldBytes: MLX.Memory.activeMemory).localizedDescription)
         }
-        let need = entry.downloadGB * 1_000_000_000 + Self.headroomBytes
+        let headroom = entry.headroomGB.map { $0 * 1e9 } ?? Self.headroomBytes
+        // A streamed build keeps only `residentGB` in memory; its download is mostly experts.bin.
+        let weightsGB = entry.streamed != nil ? (entry.residentGB ?? entry.downloadGB) : entry.downloadGB
+        let need = weightsGB * 1_000_000_000 + headroom
         if need > Double(available) {
-            return await finish("skipped", skip: String(
+            let reason = String(
                 format: "needs ~%.1f GB (weights %.2f GB + %.1f GB headroom); %.1f GB available to the app",
-                need / 1e9, entry.downloadGB, Self.headroomBytes / 1e9, Double(available) / 1e9))
+                need / 1e9, weightsGB, headroom / 1e9, Double(available) / 1e9)
+            guard forceLoad else { return await finish("skipped", skip: reason) }
+            receipt.warnings = (receipt.warnings ?? [])
+                + ["force try: the memory check would have skipped this run (\(reason))"]
         }
+
+        // Storage facts before the first load (blob bytes before/after = download detector).
+        let repoID = MLXBackend.configuration(for: entry).name
+        let localBefore = ModelStore.localSnapshot(repo: repoID) != nil
+        let bytesBefore = ModelStore.blobBytes(repo: repoID)
+        let metalBefore = MetalProbe.currentAllocatedBytes
+        // Breadcrumb: if iOS kills the app from here on, the next launch reports this run.
+        JetsamBreadcrumb.set(JetsamBreadcrumb.make(engine: "mlx", entry: entry, abStep: abStep, phase: "first load",
+                                                   noResidency: false, forced: forceLoad))
+        crumbed.set()
+        let loadSampler = ResourceSampler()
+        loadSampler.start()
+        defer { _ = loadSampler.stop() }   // early exits; a second stop is harmless
 
         do {
             // 1. First load (may download), then a warm reload.
@@ -125,6 +155,11 @@ struct BenchmarkRunner: Sendable {
                 progress(.init(message: "Downloading \(entry.displayName) \(Int(f * 100))%", fraction: 0.02))
             }
             let firstLoad = Date().timeIntervalSince(t0)
+            receipt.storage = .init(localSnapshotCompleteBefore: localBefore, bytesOnDiskBefore: bytesBefore,
+                                    bytesOnDiskAfter: ModelStore.blobBytes(repo: repoID),
+                                    path: ModelStore.localSnapshot(repo: repoID)?.path,
+                                    excludedFromBackup: ModelStore.isExcludedFromBackup(ModelStore.modelsRoot))
+            JetsamBreadcrumb.update(phase: "warm reload")
             if let c = container { receipt.model = await Self.describe(entry: entry, container: c) }
             container = nil
             backend.dropBenchmarkModel()
@@ -136,6 +171,16 @@ struct BenchmarkRunner: Sendable {
             let warmLoad = Date().timeIntervalSince(t1)
             let footprintLoaded = ResourceProbe.physFootprint()
             let availableLoaded = ResourceProbe.availableMemory()
+            let loadMem = loadSampler.stop()
+            var probe = BenchReceipt.MemoryProbeResult(
+                availableBeforeLoadBytes: available, availableAfterLoadBytes: availableLoaded,
+                physFootprintPeakBytes: max(loadMem.peakFootprint, footprintLoaded),
+                physFootprintBeforeLoadBytes: baseline, physFootprintAfterLoadBytes: footprintLoaded,
+                metalRecommendedMaxWorkingSetBytes: MetalProbe.recommendedMaxWorkingSetBytes,
+                metalAllocatedBeforeLoadBytes: metalBefore,
+                metalAllocatedAfterLoadBytes: MetalProbe.currentAllocatedBytes,
+                metalAllocatedMaxBytes: MetalProbe.currentAllocatedBytes)
+            receipt.memoryProbe = probe
 
             receipt.load = .init(
                 firstLoadS: firstLoad, downloadObserved: sawPartial.value, warmLoadS: warmLoad,
@@ -174,6 +219,12 @@ struct BenchmarkRunner: Sendable {
                     if raw.tokens.count < w.maxTokens { return await finish("cancelled") }
                     let mem = sampler.stop()
                     let snap = MLX.Memory.snapshot()
+                    probe.physFootprintPeakBytes = max(probe.physFootprintPeakBytes, mem.peakFootprint)
+                    if let now = MetalProbe.currentAllocatedBytes {
+                        probe.metalAllocatedMaxBytes = max(probe.metalAllocatedMaxBytes ?? 0, now)
+                    }
+                    receipt.memoryProbe = probe
+                    JetsamBreadcrumb.update(phase: "\(w.id) rep \(i + 1)/\(reps) done")
                     let thermalAfter = ResourceProbe.thermal()
                     if mem.maxThermal.rawValue > maxThermal.rawValue { maxThermal = mem.maxThermal }
 
@@ -244,6 +295,7 @@ struct BenchmarkRunner: Sendable {
             let input = LMInput(tokens: MLXArray(prompt.map { Int32($0) }))
             let params = MLXBackend.benchmarkParameters(for: entry, maxTokens: maxTokens, seed: BenchmarkRunner.seed)
             if isCancelled() || Task.isCancelled { throw CancellationError() }
+            _ = ExpertStreaming.takeError()   // drop a stale streamed-read failure
             let start = clock()
             var iterator = try TokenIterator(input: input, model: ctx.model, parameters: params)
             let ready = clock()
@@ -257,6 +309,8 @@ struct BenchmarkRunner: Sendable {
             let end = clock()
             // next() queued one more step; let it drain outside the timed region.
             MLX.Stream.defaultStream.synchronize()
+            // A streamed tier's failed expert read is not fatal; it fails this run instead.
+            if let failure = ExpertStreaming.takeError() { throw failure }
 
             var stops = ctx.configuration.eosTokenIds
             if let eos = ctx.tokenizer.eosTokenId { stops.insert(eos) }
@@ -283,7 +337,7 @@ struct BenchmarkRunner: Sendable {
 
     // MARK: Receipt parts
 
-    private struct EnvNow: Sendable {
+    struct EnvNow: Sendable {
         var thermal: String
         var batteryLevel: Double?
         var batteryState: String
@@ -292,7 +346,7 @@ struct BenchmarkRunner: Sendable {
     }
 
     @MainActor
-    private static func environmentNow() -> EnvNow {
+    static func environmentNow() -> EnvNow {
         let d = UIDevice.current
         d.isBatteryMonitoringEnabled = true
         let state: String = switch d.batteryState {
@@ -309,7 +363,7 @@ struct BenchmarkRunner: Sendable {
     }
 
     @MainActor
-    private static func skeleton(entry: ModelCatalog.Entry, reps: Int, env: EnvNow) -> BenchReceipt {
+    static func skeleton(entry: ModelCatalog.Entry, reps: Int, env: EnvNow) -> BenchReceipt {
         let d = UIDevice.current
         return BenchReceipt(
             receiptId: UUID().uuidString.lowercased(),
@@ -355,13 +409,19 @@ struct BenchmarkRunner: Sendable {
                                        perLayerOverrides: q.values.filter { $0 is [String: Any] }.count)
             }
         }
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        let sizes = files.filter { $0.pathExtension == "safetensors" }
-            .compactMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
-        if !sizes.isEmpty { m.weightFilesBytes = Int64(sizes.reduce(0, +)) }
+        // Snapshot files are symlinks into blobs/: measure what they point to (the old
+        // `.fileSizeKey` on the link gave `weight_files_bytes: 76`, the link's length).
+        m.weightFilesBytes = ModelStore.weightFilesBytes(in: dir)
         return m
     }
+}
+
+/// Whether this run wrote the jetsam breadcrumb (so `finish` clears only its own).
+private final class CrumbFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.withLock { flag = true } }
+    var value: Bool { lock.withLock { flag } }
 }
 
 /// Set from the download progress callback (any thread), read after the load.

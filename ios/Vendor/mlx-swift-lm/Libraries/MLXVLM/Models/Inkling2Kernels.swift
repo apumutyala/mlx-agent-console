@@ -1622,10 +1622,30 @@ private let expertHeader = """
         return as_type<float>(b == 0 ? 0x400000u : (uint(b) << 23));
     }
 
-    // The dot product of 16 weights with x, before the group scale.
+    // The dot product of 16 weights with x, before the group scale. 2- and 3-bit weights are
+    // affine only, packed as MLX does: 2-bit four per byte, 3-bit eight per three bytes, the
+    // first value in the lowest bits.
     template <int BITS, bool AFFINE>
     inline float inkling2_unit_dot(const device uint8_t* w, thread const float* x) {
         float s = 0.0f;
+        if (BITS == 2) {
+            const uint q = *(const device uint*)w;
+            for (int i = 0; i < 16; i++) {
+                s += x[i] * float((q >> (2 * i)) & 3);
+            }
+            return s;
+        }
+        if (BITS == 3) {
+            // Six bytes, which are only 2-byte aligned.
+            for (int h = 0; h < 2; h++) {
+                const uint q = uint(w[3 * h]) | (uint(w[3 * h + 1]) << 8)
+                    | (uint(w[3 * h + 2]) << 16);
+                for (int i = 0; i < 8; i++) {
+                    s += x[8 * h + i] * float((q >> (3 * i)) & 7);
+                }
+            }
+            return s;
+        }
         if (BITS == 4) {
             const uint2 q = *(const device uint2*)w;
             for (int i = 0; i < 8; i++) {
@@ -1749,7 +1769,10 @@ struct Inkling2ExpertTensors {
     /// Whether the fused expert kernels read this format with `inputDims` per row.
     func supportsFusedDecode(inputDims: Int) -> Bool {
         let modes: [QuantizationMode] = [.affine, .nvfp4, .mxfp4, .mxfp8]
-        return modes.contains(format.mode) && [4, 8].contains(format.bits)
+        // [agent-console patch K2] `lowBitAffine` is a local A/B switch; upstream drops it.
+        let lowBit = Inkling2FusedDecodeOptions.lowBitAffine
+        let bits = format.mode == .affine && lowBit ? [2, 3, 4, 8] : [4, 8]
+        return modes.contains(format.mode) && bits.contains(format.bits)
             && format.groupSize % 16 == 0 && inputDims % 16 == 0
             && (format.mode == .affine) == (biases != nil)
     }

@@ -5,7 +5,9 @@ import SwiftUI
 final class AppModel {
     static let shared = AppModel()
 
-    let backend: any ModelBackend = MLXBackend()
+    /// MLX by default; Xybrid (llama.cpp) for opt-in `.xybrid` catalog entries.
+    let engines = EngineRouter()
+    var backend: any ModelBackend { engines }
     let documents = DocumentStore()
     let batches = BatchStore()
     lazy var summarizer = DocumentSummarizer(backend: backend, documents: documents)
@@ -26,10 +28,11 @@ final class AppModel {
     }()
     lazy var node = NodeService(
         backend: backend, documents: documents,
-        trainer: (backend as? MLXBackend).map { FederatedTrainer(backend: $0) },
+        trainer: FederatedTrainer(backend: engines.mlx),
         onModelChanged: { [unowned self] in self.agent.invalidateConversation() })
     lazy var bench = BenchCoordinator(
-        backend: backend as? MLXBackend,
+        backend: engines.mlx,
+        xybrid: engines.xybrid,
         onModelUnloaded: { [unowned self] in
             self.agent.invalidateConversation()
             self.node.modelWasUnloadedByBenchmark()
@@ -40,6 +43,12 @@ final class AppModel {
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Model storage first: migrates Caches/huggingface/hub to Application Support (once)
+        // before anything can load, and writes the container marker receipts record.
+        XybridLLMBackend.applyLaunchEnvironment()   // A7: residency off for this launch only, if armed
+        _ = ModelStore.cache
+        _ = ContainerIdentity.marker
+        JetsamBreadcrumb.noteLaunch()   // a Bench load the system killed last run → report it
         // BGTaskScheduler handlers must be registered before launch completes.
         BatchCoordinator.register { AppModel.shared.batchCoordinator }
         return true

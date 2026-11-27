@@ -1095,17 +1095,22 @@ private final class Inkling2ExpertProjection: Module, Quantized {
     var bits: Int { format.bits }
     var mode: QuantizationMode { format.mode }
 
-    init(experts: Int, inputDims: Int, outputDims: Int, format: Inkling2ExpertFormat) {
+    /// - Parameter scaleType: the scales' and biases' dtype; by default bfloat16 for affine and
+    ///   uint8 otherwise. A streamed build states it in `experts.json`.
+    init(
+        experts: Int, inputDims: Int, outputDims: Int, format: Inkling2ExpertFormat,
+        scaleType: DType? = nil
+    ) {
         self.format = format
         let packed = inputDims * format.bits / 32
         let groups = inputDims / format.groupSize
         self._weight.wrappedValue = MLXArray.zeros([experts, outputDims, packed], dtype: .uint32)
-        let scaleType: DType = format.mode == .affine ? .bfloat16 : .uint8
+        let scaleType: DType = scaleType ?? (format.mode == .affine ? .bfloat16 : .uint8)
         self._scales.wrappedValue = MLXArray.zeros(
             [experts, outputDims, groups], dtype: scaleType)
         if format.mode == .affine {
             self._biases.wrappedValue = MLXArray.zeros(
-                [experts, outputDims, groups], dtype: .bfloat16)
+                [experts, outputDims, groups], dtype: scaleType)
         }
         if format.hasGlobalScale {
             self._globalScale.wrappedValue = MLXArray.ones([experts], dtype: .float32)
@@ -1177,15 +1182,26 @@ private final class Inkling2Experts: Module {
     private let activation: @Sendable (MLXArray, MLXArray) -> MLXArray
     private let softcaps: ConstantBox
 
+    /// [agent-console patch C] Set on a streamed (or traced) load: the expert tensors then hold
+    /// `capacity` slots and every call routes through it. Not a module or parameter.
+    var stream: Inkling2ExpertStreamLayer?
+
+    /// - Parameters:
+    ///   - capacity: expert slots; by default every expert (a resident load).
+    ///   - scaleTypes: the gate_up and down scales' dtypes, when known (streamed builds).
     init(
         _ config: Inkling2TextConfiguration, gateUp: Inkling2ExpertFormat,
-        down: Inkling2ExpertFormat
+        down: Inkling2ExpertFormat, capacity: Int? = nil,
+        scaleTypes: (gateUp: DType?, down: DType?) = (nil, nil)
     ) {
         let (dims, hidden) = (config.hiddenSize, config.intermediateSize)
+        let experts = capacity ?? config.experts
         _gateUpProj.wrappedValue = Inkling2ExpertProjection(
-            experts: config.experts, inputDims: dims, outputDims: 2 * hidden, format: gateUp)
+            experts: experts, inputDims: dims, outputDims: 2 * hidden, format: gateUp,
+            scaleType: scaleTypes.gateUp)
         _downProj.wrappedValue = Inkling2ExpertProjection(
-            experts: config.experts, inputDims: hidden, outputDims: dims, format: down)
+            experts: experts, inputDims: hidden, outputDims: dims, format: down,
+            scaleType: scaleTypes.down)
         activation = softcappedSwiGLU(gateSoftcap: config.gateSoftcap, upSoftcap: config.upSoftcap)
         softcaps = ConstantBox(MLXArray([config.gateSoftcap, config.upSoftcap]))
         super.init()
@@ -1194,13 +1210,29 @@ private final class Inkling2Experts: Module {
     /// `[..., K, D]` outputs of the `[..., K]` experts of each row of `x`.
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         let (out, order) = outputs(x, indices)
-        guard let order else { return out.reshaped(indices.shape + [out.dim(-1)]) }
-        return scatterUnsort(x: out, invOrder: order, shape: indices.shape)
+        return unsorted(out, order: order, shape: indices.shape)
+    }
+
+    private func unsorted(_ out: MLXArray, order: MLXArray?, shape: [Int]) -> MLXArray {
+        guard let order else { return out.reshaped(shape + [out.dim(-1)]) }
+        return scatterUnsort(x: out, invOrder: order, shape: shape)
     }
 
     /// The expert outputs `[N * K, D]` of the rows of `x` and, when they are sorted by expert,
     /// the row of each output: output `i` of the flattened `indices` is at row `order[i]`.
     func outputs(_ x: MLXArray, _ indices: MLXArray) -> (MLXArray, order: MLXArray?) {
+        guard let stream else { return residentOutputs(x, indices) }
+        switch stream.route(indices) {
+        case .direct(let slots): return residentOutputs(x, slots)
+        case .chunked(let ids):
+            return chunkedOutputs(x, ids: ids, topK: indices.dim(-1), cache: stream.cache!)
+        }
+    }
+
+    /// ``outputs(_:_:)`` with `indices` into the expert tensors as they are.
+    private func residentOutputs(_ x: MLXArray, _ indices: MLXArray) -> (
+        MLXArray, order: MLXArray?
+    ) {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
         let sort = indices.size >= 64
         var idx = indices
@@ -1216,6 +1248,40 @@ private final class Inkling2Experts: Module {
         return (out.reshaped(-1, out.dim(-1)), inverseOrder)
     }
 
+    /// [agent-console patch C] ``outputs(_:_:)`` of a call that needs more distinct experts than
+    /// the layer has slots (a long prefill chunk at low residency). The routes run expert-major in
+    /// chunks of at most `capacity` experts, resident experts first; each chunk is evaluated before
+    /// the next one may evict its slots. Rows are computed exactly as in the resident path; only
+    /// the grouping of rows into matmul segments differs.
+    private func chunkedOutputs(
+        _ x: MLXArray, ids: [UInt32], topK: Int, cache: Inkling2ExpertSlotCache
+    ) -> (MLXArray, order: MLXArray?) {
+        let rows = x.reshaped(-1, x.dim(-1))
+        var outputs = [MLXArray]()
+        var positions = [Int]()
+        positions.reserveCapacity(ids.count)
+        for chunk in cache.chunks(ids) {
+            let slots = cache.ensure(chunk.map { ids[$0] })
+            let order = chunk.indices.sorted { (slots[$0], chunk[$0]) < (slots[$1], chunk[$1]) }
+            let chunkPositions = order.map { chunk[$0] }
+            let rowIndices = MLXArray(chunkPositions.map { UInt32($0 / topK) })
+            let slotIndices = MLXArray(order.map { slots[$0] })
+            let input = rows[rowIndices].expandedDimensions(axis: -2)
+            let gateUp = gateUpProj(input, slotIndices, sorted: true)
+            let activated = activation(
+                gateUp[.ellipsis, .stride(from: 0, by: 2)],
+                gateUp[.ellipsis, .stride(from: 1, by: 2)])
+            let out = downProj(activated, slotIndices, sorted: true)
+            let flat = out.reshaped(-1, out.dim(-1))
+            eval(flat)
+            outputs.append(flat)
+            positions += chunkPositions
+        }
+        var inverse = [UInt32](repeating: 0, count: ids.count)
+        for (row, position) in positions.enumerated() { inverse[position] = UInt32(row) }
+        return (concatenated(outputs, axis: 0), MLXArray(inverse))
+    }
+
     /// The layer output `residual + conv(sum(weights * experts(x)))` of one token per row and
     /// the next convolution state. Few rows run through the fused expert kernels.
     func decode(
@@ -1228,10 +1294,25 @@ private final class Inkling2Experts: Module {
             gateUp.supportsFusedDecode(inputDims: dims),
             down.supportsFusedDecode(inputDims: hidden)
         {
+            // [agent-console patch C] A streamed layer reads the slot ids (affine kernels index
+            // the expert tensors only; NVFP4 global scales are not streamed).
+            var routed = indices
+            if let stream {
+                switch stream.route(indices) {
+                case .direct(let slots): routed = slots
+                case .chunked(let ids):
+                    let (out, order) = chunkedOutputs(
+                        x, ids: ids, topK: indices.dim(-1), cache: stream.cache!)
+                    return inkling2ExpertEpilogue(
+                        outputs: unsorted(out, order: order, shape: indices.shape),
+                        weights: weights, residual: residual, state: state,
+                        convolutionWeight: convolutionWeight)
+                }
+            }
             let activations = inkling2ExpertGateUp(
-                x, experts: gateUp, indices: indices, softcaps: softcaps.value)
+                x, experts: gateUp, indices: routed, softcaps: softcaps.value)
             return inkling2ExpertDown(
-                activations, experts: down, indices: indices, weights: weights,
+                activations, experts: down, indices: routed, weights: weights,
                 residual: residual, state: state, convolutionWeight: convolutionWeight)
         }
         return inkling2ExpertEpilogue(
@@ -1272,7 +1353,10 @@ private final class Inkling2Router: Module {
 
 private final class Inkling2SparseMoE: Module {
     @ModuleInfo(key: "gate") var router: Inkling2Router
-    @ModuleInfo var experts: Inkling2Experts
+    // [agent-console patch D] Optional: a LookAtMyQuant packed build removes it and routes the
+    // experts through `lamqExperts` instead (InklingLamqModel.swift).
+    @ModuleInfo var experts: Inkling2Experts?
+    let lamqExperts = InklingLamqExpertsBox()
 
     init(_ config: Inkling2TextConfiguration) {
         _router.wrappedValue = Inkling2Router(config)
@@ -1282,7 +1366,16 @@ private final class Inkling2SparseMoE: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, weights) = router(x)
-        return weightedExperts(experts(x, indices), weights[.ellipsis, .newAxis])
+        if let lamq = lamqExperts.value {
+            // [agent-console patch D] Weighted sum of the packed experts, float32 -> x's dtype.
+            let d = x.dim(-1)
+            let rows = x.size / d
+            let out = lamq(
+                x.reshaped(rows, d), ids: indices.reshaped(rows, -1),
+                weights: weights.reshaped(rows, -1))
+            return out.reshaped(x.shape).asType(x.dtype)
+        }
+        return weightedExperts(experts!(x, indices), weights[.ellipsis, .newAxis])
     }
 
     /// The layer output `residual + convolution(self(x))` of a prefill chunk and the window of
@@ -1294,7 +1387,8 @@ private final class Inkling2SparseMoE: Module {
         _ x: MLXArray, residual: MLXArray, convolution: Inkling2ShortConvolution,
         state: MLXArray?, mask: MLXArray?, keepsWindow: Bool
     ) -> (MLXArray, MLXArray) {
-        guard convolution.usesKernel(mask: mask), !keepsWindow else {
+        // [agent-console patch D] Packed experts combine first, then convolve (the fallback).
+        guard convolution.usesKernel(mask: mask), !keepsWindow, let experts else {
             let (output, window) = convolution(
                 self(x), state: state, mask: mask, keepsWindow: keepsWindow)
             return (residualAdd(residual, output), window)
@@ -1313,7 +1407,19 @@ private final class Inkling2SparseMoE: Module {
         convolutionWeight: MLXArray
     ) -> (MLXArray, MLXArray) {
         let (indices, weights) = router(routerInput)
-        return experts.decode(
+        if let lamq = lamqExperts.value {
+            // [agent-console patch D] Fused packed-expert matvecs, then the same epilogue the
+            // unfused path uses (weighted sum, convolution, residual).
+            let rows = indices.dim(0)
+            let outputs = lamq.slotOutputs(
+                x.reshaped(rows, x.dim(-1)), ids: indices.reshaped(rows, -1)
+            ).asType(x.dtype)
+            let out = inkling2ExpertEpilogue(
+                outputs: outputs, weights: weights, residual: residual, state: state,
+                convolutionWeight: convolutionWeight)
+            return (out.hidden, out.state)
+        }
+        return experts!.decode(
             x, indices: indices, weights: weights, residual: residual, state: state,
             convolutionWeight: convolutionWeight)
     }
@@ -1714,6 +1820,8 @@ private final class Inkling2TextModel: Module {
 
     let config: Inkling2TextConfiguration
     let visits: [Int]
+    /// [agent-console patch C] Set on a streamed or traced load. Not a module or parameter.
+    var streaming: Inkling2ExpertStreamRuntime?
 
     init(_ config: Inkling2TextConfiguration) {
         self.config = config
@@ -1762,6 +1870,13 @@ private final class Inkling2TextModel: Module {
 
         var visit = 0
         var blocks: MLXArray?
+        // [agent-console patch C] A streamed model overwrites expert slots while it builds this
+        // pass; nothing from an earlier asynchronous evaluation (the token iterator's next-step
+        // asyncEval) may still be running then, so cross-step pipelining is drained here.
+        if let streaming {
+            streaming.beginForward()
+            if streaming.streams { MLX.Stream.gpu.synchronize() }
+        }
         /// The messages of a loop pass read the previous pass's blocks after the prelude and its
         /// partial block, with the `[layers, 4, D]` queries of the core layers.
         typealias MessageSources = (blocks: MLXArray, partial: MLXArray, queries: MLXArray)
@@ -1783,6 +1898,7 @@ private final class Inkling2TextModel: Module {
                     layerMessages = (readout, 0)
                 }
                 if capturing.contains(visit) { captured.append(hidden) }
+                streaming?.visit = visit
                 (hidden, blocks) = layers[layer](
                     hidden, blocks: blocks, cache: caches?[visit], convolutionMask: convolutionMask,
                     messages: layerMessages, masks: masks)
@@ -1852,6 +1968,19 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 
     /// Loads the vision tower on the first image when the factory loads the model without it.
     private let onDemandVision: OnDemandComponent<Inkling2Vision>?
+
+    /// [agent-console patch C] The expert streaming (or routing trace) runtime of this load.
+    private var expertStreaming: Inkling2ExpertStreamRuntime?
+    /// [agent-console patch C] Set once `installExpertSlots` has run for this model.
+    private var expertSlotsInstalled = false
+    /// [agent-console patch D] The LookAtMyQuant packed directory this model loads from, if any.
+    private let lamqSource = InklingLamqSourceBox()
+
+    /// [agent-console patch D] Called by `VLMModelFactory` before the weights load when the model
+    /// directory holds a LookAtMyQuant packed build (`InklingLamqSteering.isPackedDirectory`).
+    public func useLamqPackedDirectory(_ directory: URL) {
+        lamqSource.directory = directory
+    }
 
     public var vocabularySize: Int { config.textConfiguration.unpaddedVocabularySize }
 
@@ -1962,7 +2091,12 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
                 embeddings[0..., range, 0...], cache: cache,
                 outputRows: visits == nil ? 0 ..< 1 : nil, capturing: visits ?? [])
             if visits != nil { features.append(concatenated(output.captured, axis: -1)) }
-            asyncEval(cache, features)
+            // [agent-console patch C] No overlap of prefill chunks while experts stream.
+            if expertStreaming?.streams == true {
+                eval(cache, features)
+            } else {
+                asyncEval(cache, features)
+            }
         }
         if processed > 0 { eval(cache) }
         let remaining = embeddings[0..., processed..., 0...]
@@ -2026,6 +2160,17 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     /// Converts Thinking Machines' layout, strips the `model.` scope and sets each expert layer to
     /// its checkpoint's quantization.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        // [agent-console patch D] A LookAtMyQuant packed build: steering tensors + packed files.
+        if let directory = lamqSource.directory,
+            InklingLamqSteering.isSteering(checkpoint.weights.keys)
+        {
+            return try prepareLamqCheckpoint(checkpoint, directory: directory)
+        }
+        return try prepareConvertedCheckpoint(checkpoint)
+    }
+
+    /// PR #821's own preparation (unchanged; split out by patch D).
+    private func prepareConvertedCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Inkling2Checkpoint.convertingOriginalLayout(checkpoint)
         var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count)
         for (key, value) in checkpoint.weights {
@@ -2052,6 +2197,20 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         }
 
         let text = config.textConfiguration
+        // [agent-console patch C] Slots are installed once, for the language-model checkpoint
+        // only. The vision tower's on-demand load runs `prepareCheckpoint` again with only vision
+        // tensors; reinstalling there would allocate a second slot set, drop the live experts and
+        // write expert keys into the vision checkpoint.
+        let isLanguageCheckpoint = weights.keys.contains { $0.hasPrefix("language_model.") }
+        if let runtime = expertStreaming, isLanguageCheckpoint {
+            languageModel.streaming = runtime
+            if let manifest = runtime.manifest, !expertSlotsInstalled {
+                try installExpertSlots(manifest: manifest, runtime: runtime, weights: &weights)
+                expertSlotsInstalled = true
+                checkpoint.weights = weights
+                return checkpoint
+            }
+        }
         for layer in 0 ..< text.hiddenLayers {
             let path = "language_model.layers.\(layer).mlp.experts"
             guard
@@ -2062,14 +2221,172 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
                     inputDims: text.intermediateSize)
             else { continue }
             let mlp = languageModel.layers[layer].mlp
-            if mlp.experts.gateUpProj.format != gateUp || mlp.experts.downProj.format != down {
+            if mlp.experts?.gateUpProj.format != gateUp || mlp.experts?.downProj.format != down {
                 let experts = Inkling2Experts(text, gateUp: gateUp, down: down)
                 try mlp.update(
                     modules: ModuleChildren(values: ["experts": .value(experts)]), verify: .none)
             }
+            if let runtime = expertStreaming {
+                mlp.experts?.stream = Inkling2ExpertStreamLayer(
+                    layer: layer, runtime: runtime, cache: nil)
+            }
         }
         checkpoint.weights = weights
         return checkpoint
+    }
+
+    /// [agent-console patch C] Builds every MoE layer of `manifest` with slot tensors, binds a slot
+    /// cache to them and adds them to `weights` under the expert names, so strict validation sees
+    /// a complete checkpoint although no expert tensor was read.
+    private func installExpertSlots(
+        manifest: Inkling2ExpertManifest, runtime: Inkling2ExpertStreamRuntime,
+        weights: inout [String: MLXArray]
+    ) throws {
+        let text = config.textConfiguration
+        guard manifest.experts == text.experts, manifest.hiddenSize == text.hiddenSize,
+            manifest.intermediateSize == text.intermediateSize
+        else {
+            throw Inkling2ExpertStreamingError.manifest(
+                "\(manifest.experts) experts of \(manifest.hiddenSize)x\(manifest.intermediateSize) "
+                    + "do not match the model config")
+        }
+        let capacity = runtime.capacity(experts: text.experts, topK: text.expertsPerToken)
+        let streamed = Set(manifest.layers.map(\.layer))
+        for layer in 0 ..< text.hiddenLayers where !streamed.contains(layer) {
+            if weights["language_model.layers.\(layer).mlp.experts.gate_up_proj.weight"] == nil {
+                throw Inkling2ExpertStreamingError.manifest("layer \(layer) has no experts anywhere")
+            }
+        }
+        for spec in manifest.layers {
+            guard spec.layer < text.hiddenLayers,
+                let gateUpSpec = spec.projections["gate_up_proj"],
+                let downSpec = spec.projections["down_proj"]
+            else { throw Inkling2ExpertStreamingError.manifest("layer \(spec.layer) projections") }
+            let gateUp = try Self.streamedFormat(gateUpSpec, spec: spec, projection: "gate_up_proj")
+            let down = try Self.streamedFormat(downSpec, spec: spec, projection: "down_proj")
+            func scaleType(_ projection: String) -> DType? {
+                spec.fields.first { $0.name == "\(projection).scales" }?.dtypeValue
+            }
+            let experts = Inkling2Experts(
+                text, gateUp: gateUp, down: down, capacity: capacity,
+                scaleTypes: (scaleType("gate_up_proj"), scaleType("down_proj")))
+            let path = "language_model.layers.\(spec.layer).mlp.experts"
+            var arrays = [String: MLXArray]()
+            for (name, projection) in [
+                ("gate_up_proj", experts.gateUpProj), ("down_proj", experts.downProj),
+            ] {
+                arrays["\(name).weight"] = projection.weight
+                arrays["\(name).scales"] = projection.scales
+                if let biases = projection.biases { arrays["\(name).biases"] = biases }
+            }
+            let cache = try Inkling2ExpertSlotCache(
+                spec: spec, capacity: capacity, arrays: arrays, runtime: runtime)
+            try cache.bind()
+            runtime.registerLayer(slots: capacity, experts: spec.experts, bytes: cache.slotBytes)
+            for (name, array) in arrays { weights["\(path).\(name)"] = array }
+            let mlp = languageModel.layers[spec.layer].mlp
+            try mlp.update(
+                modules: ModuleChildren(values: ["experts": .value(experts)]), verify: .none)
+            experts.stream = Inkling2ExpertStreamLayer(
+                layer: spec.layer, runtime: runtime, cache: cache)
+        }
+    }
+
+    private static func streamedFormat(
+        _ projection: Inkling2ExpertManifest.Projection, spec: Inkling2ExpertManifest.Layer,
+        projection name: String
+    ) throws -> Inkling2ExpertFormat {
+        guard projection.mode == "affine",
+            spec.fields.contains(where: { $0.name == "\(name).biases" }),
+            !spec.fields.contains(where: { $0.name.hasSuffix("global_scale") })
+        else {
+            // NVFP4/MX experts would need per-slot global scales in the fused kernels.
+            throw Inkling2ExpertStreamingError.unsupported(
+                "\(projection.mode) experts (layer \(spec.layer) \(name)); use an affine build")
+        }
+        return Inkling2ExpertFormat(
+            mode: .affine, bits: projection.bits, groupSize: projection.groupSize,
+            hasGlobalScale: false)
+    }
+}
+
+// [agent-console patch C] The loader asks the model which tensors to read.
+extension Inkling2: CheckpointLoadingHooks {
+    public func willLoadCheckpoint(from directory: URL) throws {
+        expertStreaming = try Inkling2ExpertStreamRuntime.make(directory: directory)
+    }
+
+    /// A streamed load never reads the stacked experts, even when the directory still has them.
+    public var checkpointTensorFilter: (@Sendable (String) -> Bool)? {
+        guard expertStreaming?.streams == true else { return nil }
+        return { !$0.contains(".mlp.experts.") }
+    }
+}
+
+// MARK: - [agent-console patch D] LookAtMyQuant packed builds
+
+extension Inkling2 {
+    /// The checkpoint of a LookAtMyQuant packed build in this model's layout, with the packed
+    /// layers installed (docs/LAMQ-FORMAT-SPEC.md §8-9, InklingLamqModel.swift).
+    ///
+    /// `checkpoint` holds `steering.safetensors` only. Every steering tensor is renamed (an
+    /// unknown one is an error). The six attention linears of each layer, the embedding and the
+    /// head become packed layers whose `[rows, 0]` placeholder weights go into the checkpoint,
+    /// so the strict update that follows still checks every other parameter. The routed experts
+    /// leave the module tree; the layer's MoE runs them from `lamqExperts`.
+    fileprivate func prepareLamqCheckpoint(_ checkpoint: ModelCheckpoint, directory: URL) throws
+        -> ModelCheckpoint
+    {
+        let text = config.textConfiguration
+        var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count + 160)
+        for (name, value) in checkpoint.weights {
+            guard let mapped = InklingLamqSteering.mappedName(name) else {
+                throw InklingLamqError.unsupported("steering tensor \(name)")
+            }
+            weights[mapped] = InklingLamqSteering.transform(name, value)
+        }
+
+        let tables = try InklingLamqTables(directory: directory)
+        for (index, layer) in languageModel.layers.enumerated() {
+            let meta = try InklingLamqSteering.layerMeta(directory, index)
+            let npz = try InklingLamqSteering.layerFile(directory, index)
+            var children = [String: NestedItem<String, Module>]()
+            for (lamqName, key) in InklingLamqSteering.attentionLinears {
+                guard let linearMeta = meta.linears[lamqName] else {
+                    throw InklingLamqError.file("layer \(index) has no \(lamqName)")
+                }
+                let packed = try InklingLamqPackedLinear(
+                    name: lamqName, meta: linearMeta, npz: npz, tables: tables)
+                let module = InklingLamqLinearLayer(packed)
+                children[key] = .value(module)
+                weights["language_model.layers.\(index).self_attn.\(key).weight"] = module.weight
+            }
+            try layer.attention.update(modules: ModuleChildren(values: children), verify: .none)
+            layer.mlp.lamqExperts.value = try InklingLamqPackedExperts(
+                npz: npz, tables: tables, hidden: text.hiddenSize,
+                intermediate: text.intermediateSize)
+            try layer.mlp.update(
+                modules: ModuleChildren(values: ["experts": NestedItem<String, Module>.none]),
+                verify: .none)
+        }
+
+        let embed = InklingLamqEmbeddingLayer(
+            try InklingLamqBuckets(
+                directory: directory, kind: "embed", tables: tables, hidden: text.hiddenSize))
+        try languageModel.update(
+            modules: ModuleChildren(values: ["embed_tokens": .value(embed)]), verify: .none)
+        weights["language_model.embed_tokens.weight"] = embed.weight
+
+        let head = InklingLamqHeadLayer(
+            try InklingLamqBuckets(
+                directory: directory, kind: "head", tables: tables, hidden: text.hiddenSize))
+        try update(modules: ModuleChildren(values: ["lm_head": .value(head)]), verify: .none)
+        weights["lm_head.weight"] = head.weight
+
+        var result = checkpoint
+        result.weights = weights
+        result.perLayerQuantization = nil
+        return result
     }
 }
 
