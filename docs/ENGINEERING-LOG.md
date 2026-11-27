@@ -29,7 +29,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
 | `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
-| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check | `inkling2` | PR open; Metal compile-unverified (CI freeze) |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check | `inkling2` | PR #11 open; compile-unverified (CI freeze) |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -143,7 +143,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
-### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, depends on `inkling2`)
+### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, [PR #11](https://github.com/apumutyala/mlx-agent-console/pull/11), depends on `inkling2`)
 - **Spec:** `docs/LAMQ-FORMAT-SPEC.md` covers trellis `ht*`/`rtr*` (12-bit sliding state over a reversed little-endian row bitstream, ht = Fibonacci hash into 512/1024-entry f16 LUTs), Lloyd-Max `lm6`/`lm8`, NVFP4, Kronecker Sylvester×Paley RHT with f16 "signs", 128-row-group expert maps, bucketed embed/head, and steering tensors.
   - NVFP4 passthrough ("23/192 hot buckets") is only in the 8.9/11.2 GB builds. The 3.9/4.7/5.4 GB builds are pure trellis + Lloyd-Max.
 - **Verified:** our NumPy decoder (`ios/tools/lamq/lamq_ref.py`) == LookAtMyQuant's own torch decoders (CPU), **bit-identical on 532 tensors**: 5.4 GB layers 0 and 7, every linear and all 256 expert sides each, plus 8 embed buckets. Digests are in `lamq_digests.json`. 19 NumPy tests pass, including the Metal index-math emulation.
