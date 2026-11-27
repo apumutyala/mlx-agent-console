@@ -30,7 +30,8 @@ enum ModelCatalog {
         /// Weights that stay resident once loaded, in GB (10^9 bytes). Only set for
         /// models big enough to need the runtime memory check (see `MemoryBudget`).
         var residentGB: Double? = nil
-        /// KV-cache capacity in tokens (`maxKVSize`); nil = unbounded.
+        /// Context budget in tokens: a conversation refuses new input past it (estimated from
+        /// characters). Not a `maxKVSize`: rotating caches would evict the system prompt.
         var contextTokens: Int? = nil
         /// Prompt tokens per prefill chunk; smaller = lower peak memory, slower prefill.
         var prefillStepSize: Int? = nil

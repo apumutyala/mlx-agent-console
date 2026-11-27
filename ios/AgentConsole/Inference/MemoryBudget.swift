@@ -19,8 +19,9 @@ enum MemoryBudget {
     /// Metal's recommended GPU working set for this device, if reported.
     static let gpuWorkingSetBytes: UInt64? = MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize
 
-    /// Bytes MLX holds right now (active + buffer cache), which switching models frees.
-    /// Registered by the MLX backend; 0 until then.
+    /// Bytes MLX holds right now (active + buffer cache): what unloading the current model
+    /// would free *if nothing else still uses it*. Only the Settings estimate counts it; the
+    /// load gate itself doesn't (see `fit(_:includingHeld:)`). Registered by the MLX backend.
     nonisolated(unsafe) static var heldByModel: @Sendable () -> Int = { 0 }
 
     /// MLX's active/peak/cache bytes, registered by the backend for the diagnostics readout.
@@ -58,8 +59,9 @@ enum MemoryBudget {
         }
     }
 
-    /// Whether `entry` fits in what this process can use, counting memory the current
-    /// model would release when it's unloaded.
+    /// Whether `entry` fits in what this process can use. `includingHeld` adds what the current
+    /// model holds, as if it were unloaded: right for the picker's estimate, wrong for the gate
+    /// before a load, where a running chat, fleet task or LoRA round may still hold it.
     static func fit(_ entry: ModelCatalog.Entry, includingHeld: Bool = true) -> Fit {
         guard let resident = entry.residentGB else { return .unchecked }
         let available = availableBytes
@@ -74,13 +76,18 @@ enum MemoryBudget {
     static func gb(_ bytes: UInt64) -> String { gb(Int(clamping: bytes)) }
 
     enum LoadError: LocalizedError {
-        case insufficientMemory(model: String, neededBytes: Int, budgetBytes: Int)
+        case insufficientMemory(model: String, neededBytes: Int, budgetBytes: Int, stillHeldBytes: Int)
         var errorDescription: String? {
             switch self {
-            case .insufficientMemory(let model, let needed, let budget):
-                return "\(model) needs about \(MemoryBudget.gb(needed)) (weights + 1.5 GB headroom) but only "
-                    + "\(MemoryBudget.gb(budget)) is available to the app. Pick a smaller model, close other "
-                    + "apps, or turn on “Ignore memory check” in Settings."
+            case .insufficientMemory(let model, let needed, let budget, let held):
+                var text = "\(model) needs about \(MemoryBudget.gb(needed)) (weights + 1.5 GB headroom) but only "
+                    + "\(MemoryBudget.gb(budget)) is available to the app."
+                if held > 256 * 1024 * 1024 {
+                    text += " \(MemoryBudget.gb(held)) is still held by the previous model (a running chat, "
+                        + "fleet task or training round); try again when it finishes."
+                }
+                return text + " Otherwise pick a smaller model, close other apps, or turn on "
+                    + "“Ignore memory check” in Settings."
             }
         }
     }
