@@ -80,14 +80,21 @@ enum MemoryBudget {
         var errorDescription: String? {
             switch self {
             case .insufficientMemory(let model, let needed, let budget, let held):
-                var text = "\(model) needs about \(MemoryBudget.gb(needed)) (weights + 1.5 GB headroom) but only "
-                    + "\(MemoryBudget.gb(budget)) is available to the app."
-                if held > 256 * 1024 * 1024 {
+                // What iOS lets the whole app use: free memory now plus what MLX already holds.
+                let appLimit = budget + held
+                var text = "\(model) needs about \(MemoryBudget.gb(needed)) (weights + 1.5 GB headroom); "
+                    + "iOS allows this app about \(MemoryBudget.gb(appLimit)) and \(MemoryBudget.gb(budget)) is free now."
+                if Double(appLimit) < 0.45 * Double(MemoryBudget.physicalBytes) {
+                    // ~5.3 GB on a 16 GB iPad: the default jetsam limit, not the raised one.
+                    text += " That is iOS's default limit: free Apple ID sideloads don't get the "
+                        + "increased-memory-limit entitlement. Use the streamed tier or a smaller model."
+                } else if held > 256 * 1024 * 1024 {
                     text += " \(MemoryBudget.gb(held)) is still held by the previous model (a running chat, "
                         + "fleet task or training round); try again when it finishes."
+                } else {
+                    text += " Pick a smaller model or close other apps."
                 }
-                return text + " Otherwise pick a smaller model, close other apps, or turn on "
-                    + "“Ignore memory check” in Settings."
+                return text + " (Settings › Memory has the readout; “Ignore memory check” overrides.)"
             }
         }
     }
