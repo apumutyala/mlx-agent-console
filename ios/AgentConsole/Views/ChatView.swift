@@ -5,6 +5,8 @@ struct ChatView: View {
     let backend: any ModelBackend
     @State private var draft = ""
     @State private var loadProgress: Double?
+    /// Re-runs the load task when the model is switched in Settings.
+    @AppStorage(ModelCatalog.storageKey) private var selectedModelID = ModelCatalog.defaultEntry.id
 
     var body: some View {
         NavigationStack {
@@ -42,7 +44,7 @@ struct ChatView: View {
             .toolbar {
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
             }
-            .task {
+            .task(id: selectedModelID) {
                 guard !(await backend.isLoaded) else { return }
                 loadProgress = 0
                 try? await backend.load { p in Task { @MainActor in loadProgress = p } }
@@ -64,7 +66,16 @@ private struct TurnRow: View {
     var body: some View {
         switch turn.role {
         case .user: Text(turn.text).bold()
-        case .assistant: Text(turn.text.isEmpty ? "…" : turn.text)
+        case .assistant:
+            VStack(alignment: .leading, spacing: 4) {
+                if !turn.thinking.isEmpty {
+                    DisclosureGroup("Thinking") {
+                        Text(turn.thinking).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+                Text(turn.text.isEmpty ? "…" : turn.text)
+            }
         case .tool: Text(turn.text).font(.caption.monospaced()).foregroundStyle(.secondary)
         case .error: Label(turn.text, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
         }

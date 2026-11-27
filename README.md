@@ -78,15 +78,27 @@ Set your team and change `bundleIdPrefix`. In Settings, enter the worker URL and
 
 How it is put together:
 
-- **`ModelBackend`** keeps MLX behind one interface. `MLXBackend.swift` is the only file that imports MLX. It follows `LLMEval`: `LLMModelFactory.loadContainer` loads the model, and a `ChatSession` holds each conversation. The default model is `LLMRegistry.qwen3_1_7b_4bit`.
-- **Tools.** The model proposes `<tool_call>{json}</tool_call>`. Swift then does the following in order:
+- **`ModelBackend`** keeps MLX behind one interface. `MLXBackend.swift` is the only file that imports MLX. It follows `LLMEval`: `#huggingFaceLoadModelContainer` loads the model, and a `ChatSession` holds each conversation.
+- **Models** (`Inference/ModelCatalog.swift`, picked in Settings, saved in UserDefaults). Liquid AI models are the default:
+
+  | Model | Download | Notes |
+  |---|---|---|
+  | **LFM3 1.7B** (`LiquidAI/LFM3-1.7B-MLX-4bit`) | ~1.0 GB | default; XML tool calls, `<think>` reasoning |
+  | LFM2.5 1.2B Instruct (`LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit`) | ~660 MB | fast, no thinking; pythonic tool calls |
+  | LFM2.5 350M (`LiquidAI/LFM2.5-350M-MLX-4bit`) | ~230 MB | tiny/fast, weakest at tools |
+  | LFM2.5 8B-A1B MoE (`LiquidAI/LFM2.5-8B-A1B-MLX-4bit`) | ~4.9 GB | strongest; only listed when the device has a 16 GB-class RAM (`physicalMemory` ≥ 14 GiB) |
+  | Qwen3 1.7B (`mlx-community/Qwen3-1.7B-4bit`) | ~1.0 GB | fallback (previous default) |
+
+  Switching drops the loaded container, calls `MLX.Memory.clearCache()`, starts a new chat and loads the new model (first use downloads it). LFM3 needs swift-transformers ≥ 1.4.0 (tokenizer fixes), which `project.yml` requires.
+- **Reasoning.** For thinking models mlx-swift-lm streams `<think>` content separately (`Generation.reasoning`, from each model's `reasoningConfig`). The chat shows it in a collapsed "Thinking" row; a fallback splitter hides any raw `<think>` tags the library didn't separate. Summaries drop reasoning.
+- **Tools.** Tools are declared natively (`ChatSession(tools:)` with JSON-Schema `ToolSpec`s), so each model's own chat template renders them and mlx-swift-lm parses the model's own call dialect (LFM3 XML `<tool_call><function=…>`, LFM2/2.5 pythonic `<|tool_call_start|>[f(k='v')]<|tool_call_end|>`, Qwen JSON) into structured `.toolCall`s. There is no `toolDispatch`: the app runs calls itself and returns results as `tool`-role messages. If a call slips through as plain text, `ToolCallParser` (all three dialects) is the fallback. Swift then does the following in order:
   1. Parses the proposal and rejects unknown keys (`strictDecode`).
   2. Decodes it into a typed `Arguments` struct.
   3. Validates it semantically. For example, `fileID` must name an imported file.
   4. Asks the user first if the tool needs confirmation.
   5. Runs it.
 
-  Errors go back to the model as `<tool_response>ERROR…`. The tool loop stops after 4 steps. There are two tools: `summarizeImportedFile` (read-only) and `submitWorkerJob`, which only accepts named types and always asks the user first.
+  Errors go back to the model as an `ERROR: …` tool result; a call the library rejects (malformed or undeclared) is reported back with the original request. The tool loop stops after 4 steps. There are two tools: `summarizeImportedFile` (read-only) and `submitWorkerJob`, which only accepts named types and always asks the user first.
 - **Batches** save their state after every file. When a batch expires, is cancelled or crashes, every finished summary is already saved, and Resume picks up at the next file. In the foreground on a device without background GPU, the batch stops at a file boundary when the app goes to the background. It doesn't try to run Metal work while suspended.
 - **Continued processing.** The app first checks `BGTaskScheduler.supportedResources.contains(.gpu)`. If the GPU is supported, it submits `BGContinuedProcessingTaskRequest(... ).requiredResources = .gpu` with strategy `.fail`. While the batch runs, it reports progress and updates the subtitle. On expiration it cancels the batch, which keeps all finished files. If the GPU isn't supported, or the request is refused, the batch runs in the foreground only.
 - **Job console.** `JobFeed` caches events on disk next to their cursor. After a force-quit you see what you already had immediately, and the app fetches only `after=<cursor>`. The feed long-polls (25 s), backs off on errors, and starts following again when the app returns to the foreground. Approve, Deny, Cancel (with a confirmation) and Retry are in the job screen.

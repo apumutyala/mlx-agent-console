@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// On-device agent loop: model replies → maybe a tool call → Swift validates
 /// and runs it → result goes back to the model. Bounded number of tool steps.
@@ -10,6 +11,8 @@ final class LocalAgent {
         let id = UUID()
         let role: Role
         var text: String
+        /// Hidden reasoning (`<think>`), shown collapsed under assistant turns.
+        var thinking = ""
     }
 
     private(set) var turns: [Turn] = []
@@ -20,6 +23,7 @@ final class LocalAgent {
     private let documents: DocumentStore
     private let toolsProvider: () -> ToolRegistry
     private var conversation: (any ModelConversation)?
+    private var tools: ToolRegistry?
     private var task: Task<Void, Never>?
     static let maxToolSteps = 4
 
@@ -32,6 +36,7 @@ final class LocalAgent {
     func reset() {
         task?.cancel()
         conversation = nil
+        tools = nil
         turns = []
     }
 
@@ -54,16 +59,21 @@ final class LocalAgent {
 
     private func instructions(tools: ToolRegistry) async -> String {
         let files = await documents.all().map { "- \($0.id): \($0.name)" }.joined(separator: "\n")
+        let device = UIDevice.current.model   // "iPad" / "iPhone"
         return """
-        You are a helpful assistant running entirely on the user's device.
-        You can call tools by replying with exactly one block:
-        <tool_call>{"name": "<tool>", "arguments": {...}}</tool_call>
-        and nothing else. You will then receive the tool result. Only call a tool when needed.
-        Tools:
+        You are Agent Console's on-device model (\(backend.displayName)), running locally on the user's \(device) via MLX. \
+        Nothing leaves the device unless a tool sends it, and worker jobs always need the user's approval.
+        Be concise: answer in a few sentences or a short list, no preamble.
+        You have these tools; call one only when the request needs it, otherwise just answer:
         \(tools.descriptions.map { "- " + $0 }.joined(separator: "\n"))
-        Imported files:
+        Imported files (id: name):
         \(files.isEmpty ? "(none)" : files)
         """
+    }
+
+    private enum Next {
+        case user(String)
+        case toolResult(ToolResultMessage)
     }
 
     private func run(userMessage: String) async {
@@ -71,24 +81,63 @@ final class LocalAgent {
             if !(await backend.isLoaded) {
                 try await backend.load { _ in }
             }
-            let tools = toolsProvider()
             if conversation == nil {
-                conversation = try await backend.makeConversation(instructions: await instructions(tools: tools))
+                let registry = toolsProvider()
+                tools = registry
+                conversation = try await backend.makeConversation(
+                    instructions: await instructions(tools: registry), tools: registry.specifications)
             }
-            guard let conversation else { return }
+            guard let conversation, let tools else { return }
 
-            var message = userMessage
+            var next = Next.user(userMessage)
             for _ in 0...Self.maxToolSteps {
                 try Task.checkCancellation()
                 turns.append(Turn(role: .assistant, text: ""))
                 let idx = turns.count - 1
-                var reply = ""
-                for try await chunk in conversation.send(message) {
-                    try Task.checkCancellation()
-                    reply += chunk
-                    turns[idx].text = reply
+                var raw = ""
+                var reasoning = ""
+                var nativeCall: ToolCallProposal?
+                var rejection: String?
+                let stream: AsyncThrowingStream<ModelEvent, Error>
+                switch next {
+                case .user(let text): stream = conversation.send(text)
+                case .toolResult(let result): stream = conversation.sendToolResults([result])
                 }
-                guard let call = ToolCallParser.firstCall(in: reply) else { return }
+                for try await event in stream {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .text(let chunk): raw += chunk
+                    case .reasoning(let chunk): reasoning += chunk
+                    case .toolCall(let call): if nativeCall == nil { nativeCall = call }
+                    case .rejectedToolCall(let reason): rejection = reason
+                    }
+                    // Fallback: hide any <think> the library didn't separate.
+                    let split = ThinkSplitter.split(raw)
+                    turns[idx].text = split.answer
+                    turns[idx].thinking = [reasoning, split.thinking]
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                }
+
+                if let rejection, nativeCall == nil {
+                    // The library rolls a rejected turn (and its prompt) out of the
+                    // transcript, so restate the request along with the problem.
+                    turns[idx].text = turns[idx].text.isEmpty ? "→ (invalid tool call)" : turns[idx].text
+                    turns.append(Turn(role: .tool, text: "ERROR: tool call rejected (\(rejection))"))
+                    let original: String
+                    switch next {
+                    case .user(let text): original = "The user's request was: \(text)"
+                    case .toolResult(let r): original = "The last tool result was:\n\(r.content)"
+                    }
+                    next = .user("""
+                    Your tool call could not be used (\(rejection)). Call a listed tool with valid \
+                    arguments, or answer directly. \(original)
+                    """)
+                    continue
+                }
+
+                let answer = ThinkSplitter.split(raw).answer
+                guard let call = nativeCall ?? ToolCallParser.firstCall(in: answer) else { return }
 
                 turns[idx].text = "→ \(call.name)"
                 let result: String
@@ -101,7 +150,7 @@ final class LocalAgent {
                     result = "ERROR: \(error.localizedDescription)"
                 }
                 turns.append(Turn(role: .tool, text: result))
-                message = "<tool_response>\n\(result)\n</tool_response>"
+                next = .toolResult(ToolResultMessage(callID: call.id, name: call.name, content: result))
             }
             turns.append(Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))
         } catch is CancellationError {
