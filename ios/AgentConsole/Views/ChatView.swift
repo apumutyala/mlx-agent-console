@@ -28,10 +28,13 @@ struct ChatView: View {
                     Label(loadError, systemImage: "memorychip")
                         .font(.footnote).foregroundStyle(.orange).padding(.horizontal)
                 }
+                SpeechStatusBar()
                 HStack {
                     TextField("Ask the on-device model", text: $draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...5)
+                    SpeechMicButton { text in agent.send(text) }
+                        .disabled(agent.isRunning)
                     if agent.isRunning {
                         Button("Stop", systemImage: "stop.circle.fill") { agent.stop() }
                     } else {
@@ -46,7 +49,9 @@ struct ChatView: View {
                 .padding()
             }
             .navigationTitle("Local agent")
+            .speechReadsReplies(agent)
             .toolbar {
+                SpeakerToggle()
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
             }
             .task(id: selectedModelID) {

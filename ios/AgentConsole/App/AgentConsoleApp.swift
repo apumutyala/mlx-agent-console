@@ -16,6 +16,10 @@ final class AppModel {
             summarize: SummarizeImportedFileTool(documents: documents, summarizer: summarizer),
             submitJob: (try? WorkerClient.fromSettings()).map { SubmitWorkerJobTool(client: $0) })
     }
+    lazy var node = NodeService(
+        backend: backend, documents: documents,
+        trainer: (backend as? MLXBackend).map { FederatedTrainer(backend: $0) },
+        onModelChanged: { [unowned self] in self.agent.invalidateConversation() })
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
@@ -42,6 +46,7 @@ struct AgentConsoleApp: App {
             if phase == .background, !BatchCoordinator.backgroundGPUAvailable {
                 AppModel.shared.batchCoordinator.pauseForeground()
             }
+            AppModel.shared.node.scenePhaseChanged(phase)
         }
     }
 }
@@ -57,5 +62,6 @@ struct RootView: View {
             Tab("Jobs", systemImage: "server.rack") { JobsListView() }
             Tab("Settings", systemImage: "gear") { SettingsView() }
         }
+        .task { model.node.resumeIfEnabled() }   // "Serve tasks" survives relaunch
     }
 }

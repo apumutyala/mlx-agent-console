@@ -10,12 +10,20 @@ packages:
     # two small loader patches; see Vendor/mlx-swift-lm/VENDORED.md. Needs Xcode 26.4+.
     # Depends on mlx-swift .upToNextMinor(from: "0.33.0"), same as the 3.33.0 release.
     path: Vendor/mlx-swift-lm
+  MLXSwift:
+    # Same package mlx-swift-lm 3.33.0 pins (.upToNextMinor(from: "0.33.0")),
+    # declared directly for MLXNN/MLXOptimizers (on-device LoRA training).
+    url: https://github.com/ml-explore/mlx-swift
+    minorVersion: 0.33.0
   SwiftHuggingFace:
     url: https://github.com/huggingface/swift-huggingface
     from: 0.9.0
   SwiftTransformers:
     url: https://github.com/huggingface/swift-transformers
     from: 1.4.0                         # LFM3 tokenizer needs BPE ignore_merges + code-point regex splits (#397, #398)
+  Xybrid:                               # on-device STT/TTS only (whisper.cpp + Kokoro/ONNX)
+    url: https://github.com/xybrid-ai/xybrid
+    exactVersion: 0.21.0
 targets:
   AgentConsole:
     type: application
@@ -31,10 +39,18 @@ targets:
         product: MLXLMCommon
       - package: MLXSwiftLM
         product: MLXHuggingFace
+      - package: MLXSwift
+        product: MLX
+      - package: MLXSwift
+        product: MLXNN
+      - package: MLXSwift
+        product: MLXOptimizers
       - package: SwiftHuggingFace
         product: HuggingFace
       - package: SwiftTransformers
         product: Tokenizers
+      - package: Xybrid
+        product: Xybrid
     entitlements:
       path: AgentConsole/AgentConsole.entitlements
       properties:
@@ -52,6 +68,8 @@ targets:
            UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).summarize.*
+        NSMicrophoneUsageDescription: Push-to-talk transcribes your voice on device to send to the agent.
+        NSCameraUsageDescription: Scans the pairing QR code shown by your worker so you do not have to type its token.
         NSLocalNetworkUsageDescription: Connects to your job worker on the local network.
         NSAppTransportSecurity:
           # Allows http:// to IPs and .local names (e.g. a Tailscale 100.x address).

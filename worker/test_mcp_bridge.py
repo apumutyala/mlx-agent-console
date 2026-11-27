@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import federated  # noqa: E402
 import jobworker  # noqa: E402
 import mcp_bridge  # noqa: E402
 
@@ -57,7 +58,9 @@ class BridgeTests(unittest.TestCase):
         self.secret = secrets.token_urlsafe(32)
         self.worker = jobworker.Worker(Path(self.tmp.name) / "data",
                                        jobworker.load_job_types(HERE / "job_types.json"), kill_grace=2.0)
-        self.wserver = jobworker.serve(self.worker, token, "127.0.0.1", 0)
+        self.router, self.fleet = federated.make_router(Path(self.tmp.name) / "data")
+        self.wserver = jobworker.serve(self.worker, token, "127.0.0.1", 0, self.router)
+        self.wtoken = token
         threading.Thread(target=self.wserver.serve_forever, daemon=True).start()
         api = mcp_bridge.WorkerAPI(f"http://127.0.0.1:{self.wserver.server_port}", token)
         self.audit = Path(self.tmp.name) / "audit.jsonl"
@@ -128,7 +131,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.post({"jsonrpc": "2.0", "method": "notifications/initialized"})[0], 202)
         names = {t["name"] for t in self.rpc("tools/list")["result"]["tools"]}
         self.assertEqual(names, {"list_job_types", "list_jobs", "get_job", "get_job_events",
-                                 "start_job", "cancel_job", "retry_job", "decide_approval"})
+                                 "start_job", "cancel_job", "retry_job", "decide_approval",
+                                 "list_nodes", "run_on_node", "broadcast_prompt", "get_task", "cancel_task",
+                                 "start_fed_round", "get_fed_rounds"})
         self.assertIn("error", self.rpc("nope"))
 
     def test_full_flow_start_follow_approval_cancel(self):
@@ -253,6 +258,57 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("not instructions", page["log_note"])
         _, job = self.tool("get_job", job_id=out["job"]["id"])
         self.assertIn("not instructions", job["log_note"])
+
+    def _fake_node(self, nid, reply, stop):
+        """A simulated iPad: heartbeat, long-poll, stream tokens, complete."""
+        api = mcp_bridge.WorkerAPI(f"http://127.0.0.1:{self.wserver.server_port}", self.wtoken)
+        api.call("POST", f"/nodes/{nid}/heartbeat", {"name": nid, "kind": "ipad",
+                                                   "capabilities": {"kinds": ["generate"]}})
+        while not stop.is_set():
+            api.call("POST", f"/nodes/{nid}/heartbeat", {"name": nid, "kind": "ipad",
+                                                       "capabilities": {"kinds": ["generate"]}})
+            task = api.call("GET", f"/nodes/{nid}/next?wait=1")["task"]
+            if not task:
+                continue
+            text = reply + ": " + task["payload"]["prompt"]
+            for i in range(0, len(text), 4):
+                api.call("POST", f"/tasks/{task['id']}/events",
+                         {"node_id": nid, "events": [{"kind": "token", "text": text[i:i + 4]}]})
+            api.call("POST", f"/tasks/{task['id']}/complete",
+                     {"node_id": nid, "status": "succeeded", "output": text, "metrics": {"tokens": 3}})
+
+    def test_fleet_tools(self):
+        stop = threading.Event()
+        nodes = [threading.Thread(target=self._fake_node, args=(n, n.upper(), stop), daemon=True)
+                 for n in ("ipad-1", "mac-01")]
+        for th in nodes:
+            th.start()
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                _, listed = self.tool("list_nodes")
+                if len(listed["nodes"]) == 2:
+                    break
+                time.sleep(0.1)
+            self.assertTrue(all(n["online"] for n in listed["nodes"]))
+            _, out = self.tool("run_on_node", prompt="hello", node="ipad-1", wait_seconds=20)
+            self.assertEqual(out["status"], "succeeded", out)
+            self.assertEqual(out["output"], "IPAD-1: hello")
+            self.assertIn("note", out)
+            _, b = self.tool("broadcast_prompt", prompt="sum", wait_seconds=20)
+            self.assertEqual(sorted(r["output"] for r in b["results"]), ["IPAD-1: sum", "MAC-01: sum"])
+            _, t = self.tool("get_task", task_id=out["id"])
+            self.assertEqual(t["status"], "succeeded")
+            res, _ = self.tool("run_on_node", prompt="x", node="../etc")
+            self.assertTrue(res["isError"])
+            res, _ = self.tool("start_fed_round", base_model="LiquidAI/LFM3-1.7B-MLX-4bit")
+            self.assertTrue(res["isError"])  # no train_lora-capable node
+            _, rounds = self.tool("get_fed_rounds")
+            self.assertEqual(rounds["rounds"], [])
+        finally:
+            stop.set()
+            for th in nodes:
+                th.join(5)
 
     def test_connection_cap(self):
         import socket
