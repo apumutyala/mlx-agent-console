@@ -328,10 +328,50 @@ Budget: 4.7 GB needs ≈ 0.6 GB streamed (S ≈ 110 of 128 experts per layer); 5
 | Decoder == lamq's own decoders, bit for bit | `ios/tools/lamq/crosscheck_lamq_torch.py` (torch 2.15.0 CPU) on 5.4 GB layer 0 and layer 7 (all 6 linears + all 128×2 experts each), all 8 embed buckets, and the Hadamard factors for 6 sizes. Formats covered: ht2, ht3, rtr1, rtr4 and lm6 with `out_rot` in the layers; lm6 and rtr1–4 in the embed buckets. Rotated outputs agree to ≤ 7.3e-7 relative error. | **532/532 tensors bit-identical** (686 s). Digests are in `ios/tools/lamq/lamq_digests.json`. |
 | Spec oracles | `test_lamq_ref.py`: big-integer bitstream oracle, Metal index-math emulation (dequant, matvec, lm), hash, lm6 packing, E4M3 table, Hadamard identities, npz `pread` offsets; with `LAMQ_PACKED_DIR`, it re-derives the recorded digests | 19/19 pass locally, including the real-file test |
 | Metal compiles | `ios/tools/kernels/check_lamq_metal_kernels.py --compile` (156 instantiations) in CI | sources generate locally; **compile not run (CI freeze)** |
-| Metal == reference on device | Settings › Inkling 2 Mini · LookAtMyQuant › self-check. It downloads `layer_07_packed.npz` + meta + `luts.npz` (≈ 190 MB); layer 7 uses every layer format of the build. It checks the LUT bytes, GPU-dequantizes all 6 linears and the experts covering every format, and compares SHA-256 with the digests above. It also checks 4 rows per linear against a scalar Swift decode (bit for bit), fused matvec against dequant+matmul, and the Hadamard round trip. | **not run** |
+| Metal == reference on device | Settings › LookAtMyQuant self-check on layer 7 of the 5.4 GB build (≈ 190 MB) | **Round 3 (build 135cace, iPad Pro M5): every digest passes.** Results below. |
 | Steering map + strict-update coverage | `test_steering_map.py`: literal port of the Swift map and PR #821's parameter tree vs the real 3.9 GB steering header | 0 missing / 0 extra / 0 shape mismatches (4 tests pass) |
 | 3.9 GB formats in the bit-exact check | 3.9 GB layer 0 + all 8 head buckets via `crosscheck_lamq_torch.py` | **270/270 tensors bit-identical** (585 s): layer 0, all 6 linears (ht3, rtr4) + 256 expert sides (ht2, rtr1), and all 8 head buckets (lm6, rtr2–4). Digests: `lamq_digests_3.9GB.json` |
 | End-to-end generation (3.9 GB) | wired; needs a build and the device | **not run**: compile-unverified, no greedy-agreement gate yet |
+
+### First device run (round 3, build 135cace) and the M5 TF32 finding
+
+**Passed:**
+- every LUT byte digest;
+- the dequant digests of all 6 linears (rtr4, and lm6 with `out_rot`);
+- gu experts 0, 1, 2, 63, 127 and dn experts 0, 1, 3, 4, 63, 127 (ht2, ht3, rtr1);
+- the bit-for-bit "GPU rows == scalar Swift decode" check.
+
+**Failed: one check, "Hadamard 2304 round trip, max err 5.18e-3".** This is precision, not a construction bug.
+
+**Cause.** On M5 GPUs (which have neural accelerators), MLX runs float32 GEMMs on those accelerators at TF32 unless `MLX_ENABLE_TF32=0`:
+- `mlx/utils.h`: `enable_tf32()` defaults to 1.
+- `backend/metal/matmul.cpp`: `use_nax = is_nax_available() && (enable_tf32() || dtype != float32)`.
+- M = 1 products take the gemv path and stay float32.
+
+**Evidence** (`ios/tools/lamq/rht_precision.py`, real layer-7 `gu_signs_in`):
+- The Swift factor construction, ported literally, is identical to the reference's (and so to LookAtMyQuant's) for 2304, 1152, 3072, 1024 and 384. `H Hᵀ = n I` holds exactly.
+- The round trip by input precision:
+
+  | Precision | Max error |
+  |---|---|
+  | float64 | 1.8e-15 |
+  | float32 | 1.2e-6 |
+  | TF32, round to nearest | 1.5e-3 |
+  | **TF32, truncating** | **5.1e-3** (device: 5.18e-3) |
+  | bf16 | 1.3e-2 |
+
+- The transform itself is about 6.7e-4 relative under truncating TF32.
+- The "attention fused vs dequant+matmul ≈ 7e-4" readings came from the **reference**, an M = 2 GEMM (TF32), not from the kernel. Emulated: fused float32 matvec 4.7e-7, truncating TF32 GEMM 7.3e-4, device 6.5–8.5e-4. The expert checks are M = 1 (gemv), hence 2e-7.
+
+**Fix** (branch `lamq-fix`; self-check only, no model change):
+- The matvec references run one row at a time (float32 gemv), on the same rotated input; tolerance is 1e-5.
+- The Hadamard factors are checked exactly on the host (±1 entries, `M Mᵀ = order·I`, SHA-256 equal to the reference) for 2304, 1152 and 3072.
+- The GPU transform is compared with an explicit `kron(A,B)·diag(s)/√n` through the float32 gemv, with relative tolerance 1e-2: TF32 gives about 7e-4, and a wrong matrix, order or normalisation gives errors of 1e-1 and up.
+
+**Is the TF32 rotation acceptable for inference?**
+- Yes. Its error (about 6.7e-4 relative) is below the bf16 rounding PR #821 applies between layers (2.1e-3 measured the same way).
+- It is similar to lamq's own runtime, which writes rotated activations as float16 (`rht_in_2304_fast(..., out_dtype=float16)`, ≈ 4.9e-4).
+- The packed weights themselves decode bit-exactly.
 
 ## What is left (in order)
 

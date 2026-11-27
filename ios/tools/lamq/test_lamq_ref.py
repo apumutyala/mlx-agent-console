@@ -294,6 +294,34 @@ class Hadamard(unittest.TestCase):
         np.testing.assert_allclose(x @ W.T, ref.rht_out(ref.rht_in(x, si) @ Q.T, so), atol=1e-8)
 
 
+class SwiftHadamardPort(unittest.TestCase):
+    """The Swift factor construction (ported literally in rht_precision.py) is the reference's, and
+    the on-device self-check's tolerances follow from TF32 GEMMs, not from the matrices."""
+
+    def test_swift_factors_identical(self):
+        import rht_precision as rp
+        for n in (2304, 1152, 3072, 1024, 384):
+            A, B = rp.swift_factors(n)
+            RA, RB = ref.hadamard_factors(n)
+            self.assertTrue(np.array_equal(A, RA) and np.array_equal(B, RB), n)
+
+    def test_round_trip_precision_bounds(self):
+        import rht_precision as rp
+        n = 2304
+        A, B = rp.swift_factors(n)
+        rng = np.random.default_rng(3)
+        s = (np.sign(rng.standard_normal(n)) * rng.uniform(0.982, 1.018, n)).astype(np.float32)
+        x = rng.standard_normal((1, n)).astype(np.float32)
+        want = x.astype(np.float64) * s.astype(np.float64) ** 2
+        rel = {}
+        for mode in ("f32", "tf32t"):
+            back = rp.rot_out(rp.rot_in(x, s, A, B, mode), s, A, B, mode)
+            rel[mode] = np.abs(back - want).max() / np.abs(want).max()
+        self.assertLess(rel["f32"], 1e-6)
+        self.assertLess(rel["tf32t"], 1e-2)      # the self-check's bound
+        self.assertGreater(rel["tf32t"], 1e-4)   # TF32 is why the old 1e-4 absolute bound failed
+
+
 class NpzLayout(unittest.TestCase):
     def test_member_offsets_allow_pread(self):
         with tempfile.TemporaryDirectory() as d:
