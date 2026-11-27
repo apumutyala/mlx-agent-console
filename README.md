@@ -78,15 +78,27 @@ Set your team and change `bundleIdPrefix`. In Settings, enter the worker URL and
 
 How it is put together:
 
-- **`ModelBackend`** keeps MLX behind one interface. `MLXBackend.swift` is the only file that imports MLX. It follows `LLMEval`: `LLMModelFactory.loadContainer` loads the model, and a `ChatSession` holds each conversation. The default model is `LLMRegistry.qwen3_1_7b_4bit`.
-- **Tools.** The model proposes `<tool_call>{json}</tool_call>`. Swift then does the following in order:
+- **`ModelBackend`** keeps MLX behind one interface. `MLXBackend.swift` is the only file that imports MLX. It follows `LLMEval`: `#huggingFaceLoadModelContainer` loads the model, and a `ChatSession` holds each conversation.
+- **Models** (`Inference/ModelCatalog.swift`, picked in Settings, saved in UserDefaults). Liquid AI models are the default:
+
+  | Model | Download | Notes |
+  |---|---|---|
+  | **LFM3 1.7B** (`LiquidAI/LFM3-1.7B-MLX-4bit`) | ~1.0 GB | default; XML tool calls, `<think>` reasoning |
+  | LFM2.5 1.2B Instruct (`LiquidAI/LFM2.5-1.2B-Instruct-MLX-4bit`) | ~660 MB | fast, no thinking; pythonic tool calls |
+  | LFM2.5 350M (`LiquidAI/LFM2.5-350M-MLX-4bit`) | ~230 MB | tiny/fast, weakest at tools |
+  | LFM2.5 8B-A1B MoE (`LiquidAI/LFM2.5-8B-A1B-MLX-4bit`) | ~4.9 GB | strongest; only listed when the device has a 16 GB-class RAM (`physicalMemory` ≥ 14 GiB) |
+  | Qwen3 1.7B (`mlx-community/Qwen3-1.7B-4bit`) | ~1.0 GB | fallback (previous default) |
+
+  Switching drops the loaded container, calls `MLX.Memory.clearCache()`, starts a new chat and loads the new model (first use downloads it). LFM3 needs swift-transformers ≥ 1.4.0 (tokenizer fixes), which `project.yml` requires.
+- **Reasoning.** For thinking models mlx-swift-lm streams `<think>` content separately (`Generation.reasoning`, from each model's `reasoningConfig`). The chat shows it in a collapsed "Thinking" row; a fallback splitter hides any raw `<think>` tags the library didn't separate. Summaries drop reasoning.
+- **Tools.** Tools are declared natively (`ChatSession(tools:)` with JSON-Schema `ToolSpec`s), so each model's own chat template renders them and mlx-swift-lm parses the model's own call dialect (LFM3 XML `<tool_call><function=…>`, LFM2/2.5 pythonic `<|tool_call_start|>[f(k='v')]<|tool_call_end|>`, Qwen JSON) into structured `.toolCall`s. There is no `toolDispatch`: the app runs calls itself and returns results as `tool`-role messages. If a call slips through as plain text, `ToolCallParser` (all three dialects) is the fallback. Swift then does the following in order:
   1. Parses the proposal and rejects unknown keys (`strictDecode`).
   2. Decodes it into a typed `Arguments` struct.
   3. Validates it semantically. For example, `fileID` must name an imported file.
   4. Asks the user first if the tool needs confirmation.
   5. Runs it.
 
-  Errors go back to the model as `<tool_response>ERROR…`. The tool loop stops after 4 steps. There are two tools: `summarizeImportedFile` (read-only) and `submitWorkerJob`, which only accepts named types and always asks the user first.
+  Errors go back to the model as an `ERROR: …` tool result; a call the library rejects (malformed or undeclared) is reported back with the original request. The tool loop stops after 4 steps. There are two tools: `summarizeImportedFile` (read-only) and `submitWorkerJob`, which only accepts named types and always asks the user first.
 - **Batches** save their state after every file. When a batch expires, is cancelled or crashes, every finished summary is already saved, and Resume picks up at the next file. In the foreground on a device without background GPU, the batch stops at a file boundary when the app goes to the background. It doesn't try to run Metal work while suspended.
 - **Continued processing.** The app first checks `BGTaskScheduler.supportedResources.contains(.gpu)`. If the GPU is supported, it submits `BGContinuedProcessingTaskRequest(... ).requiredResources = .gpu` with strategy `.fail`. While the batch runs, it reports progress and updates the subtitle. On expiration it cancels the batch, which keeps all finished files. If the GPU isn't supported, or the request is refused, the batch runs in the foreground only.
 - **Job console.** `JobFeed` caches events on disk next to their cursor. After a force-quit you see what you already had immediately, and the app fetches only `after=<cursor>`. The feed long-polls (25 s), backs off on errors, and starts following again when the app returns to the foreground. Approve, Deny, Cancel (with a confirmation) and Retry are in the job screen.
@@ -198,6 +210,37 @@ claude mcp add --transport http job-worker http://127.0.0.1:8788/mcp --header "A
 - injection and unknown-argument rejection
 - log paging that stays within the size budget and resumes exactly where it stopped
 - a session driven by the **official MCP Python SDK client** (v2.3.0), as an independent compatibility check
+
+## Compute fleet and federated training
+
+The worker also coordinates a **fleet of devices** (the iPad, other Macs/iPhones) that run models
+locally. Devices never accept inbound connections: each one sends heartbeats, long-polls for its
+next task, streams tokens back, uploads artifacts, and reports a result. That works through NAT,
+Tailscale, and iOS's networking rules (the app serves while it is open, or during a
+user-started continued-processing task).
+
+| | |
+|---|---|
+| Protocol + storage | [`worker/fleet.py`](worker/fleet.py): nodes, task queue, long-poll, cancel, requeue when a node vanishes (max 2 attempts), artifacts |
+| Federated rounds | [`worker/federated.py`](worker/federated.py): one `train_lora` task per device, then a weighted **FedAvg** of the uploaded LoRA adapters (stdlib safetensors F32/F16/BF16) |
+| Claude tools | `list_nodes`, `run_on_node`, `broadcast_prompt` (same prompt on every device, in parallel), `get_task`, `cancel_task`, `start_fed_round`, `get_fed_rounds` |
+| Tests | `worker/test_fleet.py` (simulated nodes over HTTP, FedAvg numerics, restart/offline requeue); `test_mcp_bridge.test_fleet_tools` |
+
+**Federated LoRA round**:
+1. The coordinator sends each device the same seed, rank and layer count, plus the previous global adapter when there is one.
+2. Each device trains on its own documents and/or a shard of examples. Raw data never leaves the device.
+3. Each device uploads `adapter.safetensors`.
+4. The coordinator averages the adapters, weighted by example count, and publishes the result at `/fed/rounds/{id}/adapter`.
+
+**Pairing the iPad**: on the worker machine run `worker\pair.ps1` (`-Ascii` prints the code in the terminal). It shows a QR code holding the worker URL and token. On the iPad, go to Settings → **Scan pairing code**. The image is deleted when you press Enter.
+
+The iPad reaches the worker over the tailnet only (`tailscale serve --https=8443 http://127.0.0.1:8787`). Only the MCP bridge is on the public Funnel.
+
+**What iOS does not allow:**
+- Controlling other apps, firmware, or which apps run in the background.
+- A permanently running background server.
+
+On a device that allows background GPU, a node serves in the foreground or inside a `BGContinuedProcessingTask` that you start. Everything in this repo stays inside those rules.
 
 ## Security notes
 

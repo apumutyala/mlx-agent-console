@@ -13,6 +13,7 @@ API (all routes require `Authorization: Bearer <WORKER_TOKEN>`):
     POST /jobs/{id}/cancel
     POST /jobs/{id}/retry              -> new job with the same type/params
     POST /jobs/{id}/approvals/{aid}    {"decision": "approve" | "deny"}
+    GET  /models[/<name>[/<file>]]     read-only model files (with --models-dir; see models.py)
 
 Design rules:
   * Jobs are named types from a config file. There is no raw-shell endpoint.
@@ -43,6 +44,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from models import parse_range  # single `Range: bytes=a-b` on file responses (resumable downloads)
 
 IS_WINDOWS = os.name == "nt"
 APPROVAL_PREFIX = "::approval::"
@@ -374,12 +377,15 @@ class Worker:
         return self.create(job.meta["type"], job.meta["params"], retry_of=job.id)
 
 
-def make_handler(worker: Worker, token: str):
+def make_handler(worker: Worker, token: str, router=None):
+    """`router(method, parts, query, read_json, read_raw)` may claim extra
+    routes (the compute fleet); it returns None, (status, dict) or (status, Path)."""
     token_b = token.encode()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "jobworker/1"
+        timeout = 90  # idle socket timeout; longer than the 30 s long-poll cap
 
         def log_message(self, fmt, *args):  # quiet; jobs have their own logs
             if os.environ.get("WORKER_ACCESS_LOG"):
@@ -402,13 +408,71 @@ def make_handler(worker: Worker, token: str):
 
         def _body(self) -> dict:
             n = int(self.headers.get("Content-Length") or 0)
-            if n > 1_000_000:
-                raise ValueError("body too large")
+            if n < 0 or n > 1_000_000:
+                raise ValueError("bad or too large Content-Length")
             raw = self.rfile.read(n) if n else b"{}"
             body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
             return body
+
+        def _raw(self, limit: int = 64 * 1024 * 1024) -> bytes:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n < 0 or n > limit:
+                raise ValueError("bad or too large Content-Length")
+            return self.rfile.read(n) if n else b""
+
+        def _send_file(self, path: Path) -> None:
+            size = path.stat().st_size
+            rng = parse_range(self.headers.get("Range"), size)
+            if rng == "invalid":
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            start, end = rng if rng else (0, size - 1)
+            length = end - start + 1 if size else 0
+            self.send_response(206 if rng else 200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            if rng:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            with path.open("rb") as f:
+                f.seek(start)
+                left = length
+                while left > 0 and (chunk := f.read(min(1 << 20, left))):
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+
+        def _route(self, method: str) -> bool:
+            if router is None:
+                return False
+            url = urlparse(self.path)
+            parts = [p for p in url.path.split("/") if p]
+            try:
+                out = router(method, parts, parse_qs(url.query), self._body, self._raw)
+            except (ValueError, json.JSONDecodeError) as e:
+                out = (400, {"error": str(e)})
+            if out is None:
+                return False
+            status, body = out
+            if method in ("PUT", "POST") and status >= 400:
+                # The request body may be unread (e.g. refused for size); don't reuse this connection.
+                self.close_connection = True
+            if isinstance(body, Path):
+                self._send_file(body)
+            else:
+                self._send(status, body)
+            return True
+
+        def do_PUT(self):
+            if not self._auth():
+                return
+            if not self._route("PUT"):
+                self._send(404, {"error": "not found"})
 
         def _job(self, job_id: str) -> Job | None:
             job = worker.jobs.get(job_id)
@@ -417,7 +481,7 @@ def make_handler(worker: Worker, token: str):
             return job
 
         def do_GET(self):
-            if not self._auth():
+            if not self._auth() or self._route("GET"):
                 return
             url = urlparse(self.path)
             parts = [p for p in url.path.split("/") if p]
@@ -452,7 +516,7 @@ def make_handler(worker: Worker, token: str):
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            if not self._auth():
+            if not self._auth() or self._route("POST"):
                 return
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             try:
@@ -489,8 +553,8 @@ def load_job_types(path: Path) -> dict[str, JobType]:
     return types
 
 
-def serve(worker: Worker, token: str, host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(worker, token))
+def serve(worker: Worker, token: str, host: str, port: int, router=None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), make_handler(worker, token, router))
     server.daemon_threads = True
     return server
 
@@ -502,14 +566,22 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address; expose via Tailscale/VPN or a TLS proxy, not raw internet")
     ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--models-dir", type=Path, default=os.environ.get("WORKER_MODELS_DIR"),
+                    help="serve streamed model builds read-only at GET /models/<name>/<file>")
     args = ap.parse_args()
     token = os.environ.get("WORKER_TOKEN", "")
     if len(token) < 24:
         sys.exit("set WORKER_TOKEN to a random secret of at least 24 chars")
     worker = Worker(args.data, load_job_types(args.config))
-    server = serve(worker, token, args.host, args.port)
+    from federated import make_router  # compute fleet + federated rounds
+    router, fleet = make_router(args.data)
+    if args.models_dir:
+        from models import chain, make_models_router
+        router = chain(make_models_router(Path(args.models_dir)), router)
+    server = serve(worker, token, args.host, args.port, router)
     print(f"jobworker listening on http://{args.host}:{args.port} "
-          f"({len(worker.job_types)} job types, {len(worker.jobs)} persisted jobs)")
+          f"({len(worker.job_types)} job types, {len(worker.jobs)} persisted jobs, "
+          f"{len(fleet.nodes)} known nodes)")
     server.serve_forever()
 
 

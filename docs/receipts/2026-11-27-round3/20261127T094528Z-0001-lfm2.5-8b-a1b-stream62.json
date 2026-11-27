@@ -1,0 +1,60 @@
+{
+ "app_git_sha": "135cace6f197833c51b6a42ece899d8ef6dc2f73",
+ "app_version": "1.0 (1)",
+ "created_at": "2026-11-27T09:45:17Z",
+ "device": {
+  "machine": "iPad17,3",
+  "model": "iPad",
+  "os": "iPadOS 27.2.1",
+  "physical_memory_bytes": 16136650752,
+  "processor_count": 10
+ },
+ "engine": "mlx",
+ "environment": {
+  "available_memory_after_bytes": 5255592208,
+  "available_memory_before_bytes": 5255575824,
+  "battery_level_after": 1,
+  "battery_level_before": 1,
+  "battery_state_after": "full",
+  "battery_state_before": "full",
+  "low_power_mode": false,
+  "thermal_after": "nominal",
+  "thermal_before": "nominal",
+  "thermal_max_during": "nominal"
+ },
+ "error": "Download of LFM2.5-8B-A1B-MLX-4bit-stream failed with HTTP 404.",
+ "identity": {
+  "bundle_identifier": "com.apumutyala.AgentConsole.L8T7GPUXTV",
+  "container_marker_created_at": "2026-11-27T09:29:19Z",
+  "container_marker_id": "5e2126db-7573-48d6-ba54-15d4b171bffa",
+  "container_path_hash": "2b897952b400bbac"
+ },
+ "library": {
+  "mlx_swift": "0.33.x",
+  "mlx_swift_lm": "3.33.0"
+ },
+ "model": {
+  "catalog_download_gb": 4.85,
+  "display_name": "LFM2.5 8B-A1B (MoE) \u00b7 streamed 62%",
+  "id": "lfm2.5-8b-a1b-stream62",
+  "repo": "LiquidAI/LFM2.5-8B-A1B-MLX-4bit"
+ },
+ "params": {
+  "memory_sample_interval_ms": 50,
+  "mlx_cache_limit_bytes": 33554432,
+  "prompt_mode": "raw token ids, no chat template; filled prompts cut to exact length",
+  "repetitions": 3,
+  "seed": 1234,
+  "settle_s": 10,
+  "stop_tokens": "ignored: every rep decodes max_tokens (first stop index recorded)",
+  "temperature": 0,
+  "timing": "wall clock around mlx-swift-lm TokenIterator; ttft = init + first next(); decode_tps = (n-1)/(t_last - t_first); one untimed warm-up per workload",
+  "warmup_tokens": 8
+ },
+ "receipt_id": "c363d013-c507-4bcc-807c-e47d4569744b",
+ "schema": 1,
+ "status": "failed",
+ "total_wall_s": 10.334006905555725,
+ "workload_set": "w2",
+ "workloads": []
+}

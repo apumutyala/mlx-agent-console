@@ -22,7 +22,26 @@ jobs:
         working-directory: worker
         run: |
           pip install mcp
-          python -m unittest -v test_jobworker test_mcp_bridge
+          python -m unittest -v test_jobworker test_mcp_bridge test_fleet test_models
+
+      - name: Inkling expert kernel reference (numpy)
+        if: hashFiles('ios/tools/kernels/test_inkling2_expert_ref.py') != ''
+        working-directory: ios/tools/kernels
+        run: |
+          pip install numpy
+          python -m unittest -v test_inkling2_expert_ref
+
+      - name: Expert repack tests
+        working-directory: tools
+        run: |
+          pip install numpy
+          python -m unittest -v test_expert_repack test_expert_trace_sim
+
+      - name: lamq reference decoder tests (numpy)
+        working-directory: ios/tools/lamq
+        run: |
+          pip install numpy
+          python -m unittest -v test_lamq_ref test_steering_map
 
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.
@@ -66,8 +85,37 @@ jobs:
             -derivedDataPath build \
             -skipPackagePluginValidation -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            APP_GIT_SHA="${GITHUB_SHA}" \
             build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecated|Sendable)|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" build.log
+
+      # Kernels built at runtime with MLXFast.metalKernel are Swift strings: the app build
+      # never compiles them. Rebuild the source MLX generates and compile it here.
+      - name: Compile runtime Metal kernels
+        if: always() && hashFiles('ios/tools/kernels/check_metal_kernels.py') != ''
+        run: |
+          MLX=ios/build/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx
+          ARGS=""
+          if [ -f "$MLX/mlx/backend/metal/kernels/utils.h" ]; then
+            ARGS="--mlx-include $MLX"
+          else
+            echo "::warning::mlx checkout not found; compiling with the minimal prelude"
+          fi
+          python3 ios/tools/kernels/check_metal_kernels.py --out ios/build/metal-check --compile $ARGS
+
+      # lamq kernels are MLXFast.metalKernel strings the app build never compiles: rebuild the
+      # source MLX generates and compile it (docs/LAMQ-FORMAT-SPEC.md).
+      - name: Compile lamq Metal kernels
+        if: always() && hashFiles('ios/tools/kernels/check_lamq_metal_kernels.py') != ''
+        run: |
+          MLX=ios/build/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx
+          ARGS=""
+          if [ -f "$MLX/mlx/backend/metal/kernels/utils.h" ]; then
+            ARGS="--mlx-include $MLX"
+          else
+            echo "::warning::mlx checkout not found; compiling with the minimal prelude"
+          fi
+          python3 ios/tools/kernels/check_lamq_metal_kernels.py --out ios/build/lamq-metal --compile $ARGS
 
       - name: Errors summary
         if: failure()

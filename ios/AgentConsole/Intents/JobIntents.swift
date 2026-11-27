@@ -103,5 +103,7 @@ struct AgentConsoleShortcuts: AppShortcutsProvider {
                     shortTitle: "Job Status", systemImageName: "list.bullet.rectangle")
         AppShortcut(intent: CancelJobIntent(), phrases: ["Cancel a job in \(.applicationName)"],
                     shortTitle: "Cancel Job", systemImageName: "xmark.octagon")
+        AppShortcut(intent: ToggleComputeNodeIntent(), phrases: ["Toggle compute node in \(.applicationName)"],
+                    shortTitle: "Compute Node", systemImageName: "cpu")
     }
 }
