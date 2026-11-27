@@ -74,6 +74,7 @@ struct RecallTool: AgentTool {
     static let keys: Set<String> = ["query", "limit"]
 
     let harness: MemoryHarness
+    let conversationID: UUID
 
     func validate(_ args: Arguments) async throws {
         let q = args.query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -89,6 +90,8 @@ struct RecallTool: AgentTool {
         let chosen = ContextAssembler.packMemories(hits, budget: 500, maxItems: args.limit ?? 6)
         guard !chosen.isEmpty else { return "No matching memories." }
         await harness.memories.markAccessed(chosen.map(\.id))
+        // Untrusted text now sits in this chat's context: whatever it learns is untrusted too.
+        if chosen.contains(where: { $0.trust == .untrusted }) { await harness.markTainted(conversationID) }
         return chosen.map { "- " + ContextAssembler.memoryLine($0) }.joined(separator: "\n")
     }
 }
@@ -146,7 +149,7 @@ extension ToolRegistry {
     /// Adds remember/recall/forget, bound to one conversation.
     mutating func registerMemoryTools(_ harness: MemoryHarness, conversationID: UUID) {
         register(RememberTool(harness: harness, conversationID: conversationID), keys: RememberTool.keys)
-        register(RecallTool(harness: harness), keys: RecallTool.keys)
+        register(RecallTool(harness: harness, conversationID: conversationID), keys: RecallTool.keys)
         register(ForgetTool(harness: harness), keys: ForgetTool.keys)
     }
 }

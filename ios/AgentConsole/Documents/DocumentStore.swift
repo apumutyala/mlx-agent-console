@@ -6,6 +6,9 @@ struct ImportedDocument: Codable, Identifiable, Hashable, Sendable {
     let name: String
     let storedFilename: String
     let importedAt: Date
+    /// True for documents written by the agent's create_document tool. Nil for
+    /// imports (and for index entries written before the field existed).
+    var agentCreated: Bool?
 }
 
 /// Imported files are copied into the app container, so summarization works
@@ -71,7 +74,7 @@ actor DocumentStore {
         let id = String(UUID().uuidString.prefix(8)).lowercased()
         let stored = "\(id)-\(unique)"
         try Data(text.utf8).write(to: dir.appending(path: stored), options: .atomic)
-        let doc = ImportedDocument(id: id, name: unique, storedFilename: stored, importedAt: .now)
+        let doc = ImportedDocument(id: id, name: unique, storedFilename: stored, importedAt: .now, agentCreated: true)
         docs.append(doc)
         try save()
         return doc
@@ -83,7 +86,10 @@ actor DocumentStore {
             throw CocoaError(.fileWriteNoPermission)
         }
         let url = dir.appending(path: doc.storedFilename)
-        let current = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        // Never fall back to "": a missing, unreadable or non-UTF-8 file must not
+        // be replaced by just the appended text.
+        guard let data = try? Data(contentsOf: url) else { throw CocoaError(.fileReadNoSuchFile) }
+        guard let current = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadInapplicableStringEncoding) }
         let joined = current.isEmpty || current.hasSuffix("\n") ? current + text : current + "\n" + text
         guard joined.count <= maxLength else { throw CocoaError(.fileWriteOutOfSpace) }
         try Data(joined.utf8).write(to: url, options: .atomic)
@@ -97,6 +103,12 @@ actor DocumentStore {
         if let d = docs.first(where: { $0.id == key }) { return d }
         if let d = docs.last(where: { $0.name.lowercased() == key }) { return d }
         return docs.last { ($0.name as NSString).deletingPathExtension.lowercased() == key }
+    }
+
+    /// Whether the stored file exists and decodes as UTF-8 text.
+    func isUTF8Text(_ doc: ImportedDocument) -> Bool {
+        guard let data = try? Data(contentsOf: dir.appending(path: doc.storedFilename)) else { return false }
+        return String(data: data, encoding: .utf8) != nil
     }
 
     func size(of doc: ImportedDocument) -> Int {

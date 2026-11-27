@@ -101,6 +101,11 @@ struct AppendToDocumentTool: AgentTool {
     static let keys: Set<String> = ["id_or_name", "text"]
 
     let documents: DocumentStore
+    /// Set in `validate` for documents the user imported: appending to those
+    /// needs the user's approval (confirmation is synchronous).
+    private let importedTarget = PreviewBox()
+
+    init(documents: DocumentStore) { self.documents = documents }
 
     func validate(_ args: Arguments) async throws {
         guard let doc = await documents.resolve(args.id_or_name) else {
@@ -109,9 +114,18 @@ struct AppendToDocumentTool: AgentTool {
         guard DocumentNames.isWritable(doc.name) else {
             throw ToolError.invalidArguments("\(doc.name) is not a .txt or .md document")
         }
+        guard await documents.isUTF8Text(doc) else {
+            throw ToolError.invalidArguments("\(doc.name) is not readable UTF-8 text; create a new document instead")
+        }
         guard !args.text.isEmpty, args.text.count <= DocumentLimits.maxAppendCharacters else {
             throw ToolError.invalidArguments("text must be 1...\(DocumentLimits.maxAppendCharacters) characters")
         }
+        importedTarget.set(doc.agentCreated == true ? "" : doc.name)
+    }
+
+    func confirmationPrompt(_ args: Arguments) -> String? {
+        guard let name = importedTarget.get(), !name.isEmpty else { return nil }
+        return "Append \(args.text.count) characters to your imported file “\(name)”?"
     }
 
     func run(_ args: Arguments) async throws -> String {

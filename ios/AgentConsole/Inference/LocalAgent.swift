@@ -48,6 +48,8 @@ final class LocalAgent {
     /// New chat. The finished one stays in history and is reflected on.
     func reset() {
         task?.cancel()
+        // A turn parked on a confirmation alert must not run its tool later.
+        answerConfirmation(false)
         persist()
         memory?.conversationEnded(conversationID)
         conversation = nil
@@ -153,7 +155,19 @@ final class LocalAgent {
         case toolResult(ToolResultMessage)
     }
 
+    /// Appends only while `chat` is still the open conversation, so a turn
+    /// cancelled by New chat / delete / resume can't write into the next one.
+    private func append(to chat: UUID, _ turn: Turn) {
+        guard conversationID == chat else { return }
+        turns.append(turn)
+    }
+
+    private func ensureCurrent(_ chat: UUID) throws {
+        guard conversationID == chat else { throw CancellationError() }
+    }
+
     private func run(userMessage: String) async {
+        let chat = conversationID
         do {
             // Reflection/embedding must not share the GPU with this turn
             // (cancelled before we queue for the gate, so no gate deadlock).
@@ -181,6 +195,7 @@ final class LocalAgent {
             var next = Next.user(prefix + userMessage)
             for _ in 0...Self.maxToolSteps {
                 try Task.checkCancellation()
+                try ensureCurrent(chat)
                 turns.append(Turn(role: .assistant, text: ""))
                 let idx = turns.count - 1
                 var raw = ""
@@ -197,6 +212,7 @@ final class LocalAgent {
                 try await withGPU {
                 for try await event in stream {
                     try Task.checkCancellation()
+                    try ensureCurrent(chat)
                     switch event {
                     case .text(let chunk): raw += chunk
                     case .reasoning(let chunk): reasoning += chunk
@@ -212,11 +228,12 @@ final class LocalAgent {
                 }
                 }
 
+                try ensureCurrent(chat)
                 if let rejection, nativeCall == nil {
                     // The library rolls a rejected turn (and its prompt) out of the
                     // transcript, so restate the request along with the problem.
                     turns[idx].text = turns[idx].text.isEmpty ? "→ (invalid tool call)" : turns[idx].text
-                    turns.append(Turn(role: .tool, text: "ERROR: tool call rejected (\(rejection))"))
+                    append(to: chat, Turn(role: .tool, text: "ERROR: tool call rejected (\(rejection))"))
                     let original: String
                     switch next {
                     case .user(let text): original = "The user's request was: \(text)"
@@ -242,14 +259,15 @@ final class LocalAgent {
                     // Errors go back to the model so it can correct itself.
                     result = "ERROR: \(error.localizedDescription)"
                 }
-                turns.append(Turn(role: .tool, text: result, remote: MemoryHarness.isRemoteTool(call.name)))
+                try ensureCurrent(chat)
+                append(to: chat, Turn(role: .tool, text: result, remote: MemoryHarness.isRemoteTool(call.name)))
                 next = .toolResult(ToolResultMessage(callID: call.id, name: call.name, content: result))
             }
-            turns.append(Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))
+            append(to: chat, Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))
         } catch is CancellationError {
-            turns.append(Turn(role: .error, text: "Stopped."))
+            append(to: chat, Turn(role: .error, text: "Stopped."))
         } catch {
-            turns.append(Turn(role: .error, text: error.localizedDescription))
+            append(to: chat, Turn(role: .error, text: error.localizedDescription))
         }
     }
 

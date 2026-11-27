@@ -136,12 +136,12 @@ struct MemoryListView: View {
                     .buttonStyle(.plain)
                     .swipeActions(edge: .trailing) {
                         Button("Delete", systemImage: "trash", role: .destructive) {
-                            Task { try? await memory.memories.delete(ids: [r.id]); await reload() }
+                            Task { try? await memory.memories.delete(ids: [r.id]); await mutated() }
                         }
                     }
                     .swipeActions(edge: .leading) {
                         Button(r.pinned ? "Unpin" : "Pin", systemImage: r.pinned ? "pin.slash" : "pin") {
-                            Task { try? await memory.memories.edit(id: r.id, pinned: !r.pinned); await reload() }
+                            Task { try? await memory.memories.edit(id: r.id, pinned: !r.pinned); await mutated() }
                         }
                         .tint(.orange)
                     }
@@ -154,7 +154,7 @@ struct MemoryListView: View {
         .sheet(item: $editing) { r in
             MemoryEditor(title: "Edit memory", initial: r) { text, kind, importance, pinned in
                 try await memory.memories.edit(id: r.id, text: text, kind: kind, importance: importance, pinned: pinned)
-                await reload()
+                await mutated()
             }
         }
         .sheet(isPresented: $adding) {
@@ -162,13 +162,19 @@ struct MemoryListView: View {
                 let stored = try await memory.memories.upsert(MemoryRecord(
                     kind: kind, text: text, importance: importance, pinned: pinned, trust: .user))
                 await memory.embedIfPossible(stored)
-                await reload()
+                await mutated()
             }
         }
     }
 
+    /// Reads only. Must not bump `revision`: `.task(id: memory.revision)` calls it.
     private func reload() async {
         records = await memory.memories.all()
+    }
+
+    /// After a real change: reload, then tell other views (bumps `revision` once).
+    private func mutated() async {
+        await reload()
         memory.noteChanged()
     }
 }

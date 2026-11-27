@@ -14,6 +14,20 @@ import SwiftUI
 /// and are cancelled (and awaited) before a chat turn generates, so two model
 /// workloads never share the GPU. In the background (no Metal), nothing runs;
 /// pending reflections drain on the next foreground.
+/// Resumes a continuation exactly once, from whichever caller is first.
+final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Void, Never>?
+    init(_ cont: CheckedContinuation<Void, Never>) { self.cont = cont }
+    func resume() {
+        lock.lock()
+        let c = cont
+        cont = nil
+        lock.unlock()
+        c?.resume()
+    }
+}
+
 @MainActor @Observable
 final class MemoryHarness {
     // MARK: Settings (UserDefaults; read by the Memory screen via @AppStorage)
@@ -40,10 +54,22 @@ final class MemoryHarness {
     var embeddingsEnabled: Bool { UserDefaults.standard.bool(forKey: Key.embeddings) }
     var budgetTokens: Int { min(max(UserDefaults.standard.integer(forKey: Key.budget), 200), 4000) }
 
-    /// Tool results from these tools came from another machine: untrusted.
+    /// Tool results from these tools carry text the user didn't write: output
+    /// from another machine, or summaries of imported documents. Untrusted.
     nonisolated static func isRemoteTool(_ name: String) -> Bool {
         let n = name.lowercased()
-        return ["worker", "fleet", "job", "node", "remote"].contains(where: n.contains)
+        return ["worker", "fleet", "job", "node", "remote", "summar", "import"].contains(where: n.contains)
+    }
+
+    /// Conversations whose model context has carried untrusted text even
+    /// though no remote tool ran (untrusted memories injected or recalled).
+    @ObservationIgnored private var taintedConversations: Set<UUID> = []
+
+    func markTainted(_ id: UUID) { taintedConversations.insert(id) }
+
+    private func noteInjected(_ records: [MemoryRecord], into id: UUID) {
+        injected[id, default: []].formUnion(records.map(\.id))
+        if records.contains(where: { $0.trust == .untrusted }) { markTainted(id) }
     }
 
     // MARK: State
@@ -58,7 +84,7 @@ final class MemoryHarness {
     @ObservationIgnored weak var agent: LocalAgent?
 
     /// Human-readable status of the last background pass (Memory screen).
-    private(set) var status = "Idle"
+    private(set) var status = AtomicJSON.problems.isEmpty ? "Idle" : AtomicJSON.problems.joined(separator: "\n")
     private(set) var isWorking = false
     private(set) var embedderLoaded = false
     /// Bumped whenever memories/playbook change, so views reload.
@@ -108,7 +134,7 @@ final class MemoryHarness {
         if useMemory {
             let query = ([firstMessage] + resumed.suffix(4).filter { $0.role == .user }.map(\.text)).joined(separator: " ")
             chosen = await retrieve(query, budget: budgetTokens, excluding: [])
-            injected[conversationID, default: []].formUnion(chosen.map(\.id))
+            noteInjected(chosen, into: conversationID)
         }
         let budget = ContextAssembler.Budget(memories: budgetTokens)
         return ContextAssembler.systemBlock(situation: situation, playbook: useMemory ? entries : [],
@@ -119,20 +145,22 @@ final class MemoryHarness {
     func turnContext(_ message: String, conversationID: UUID) async -> String? {
         guard useMemory else { return nil }
         let seen = injected[conversationID] ?? []
+        // Absolute relevance (share of the query's IDF mass matched, or cosine):
+        // a single shared common word no longer qualifies.
         let chosen = await retrieve(message, budget: max(budgetTokens / 3, 150), excluding: seen, maxItems: 4,
-                                    minScore: 0.25)
-        injected[conversationID, default: []].formUnion(chosen.map(\.id))
+                                    minRelevance: 0.34)
+        noteInjected(chosen, into: conversationID)
         return ContextAssembler.turnNote(chosen)
     }
 
     private func retrieve(_ query: String, budget: Int, excluding: Set<String>, maxItems: Int = 12,
-                          minScore: Double = 0) async -> [MemoryRecord] {
+                          minRelevance: Double = 0) async -> [MemoryRecord] {
         var qv: [Float]?
         if embedderAllowed, await embedder.isLoaded {
             qv = try? await embedder.embed([query], role: .query).first
         }
         let ranked = await memories.search(query, queryVector: qv, embeddingModel: MemoryEmbedder.modelID, limit: 40)
-            .filter { $0.score >= minScore }
+            .filter { $0.relevance >= minRelevance }
             .map(\.record)
         let chosen = ContextAssembler.packMemories(ranked, budget: budget, maxItems: maxItems, excluding: excluding)
         await memories.markAccessed(chosen.map(\.id))
@@ -142,7 +170,8 @@ final class MemoryHarness {
     // MARK: Persistence
 
     func persist(conversationID: UUID, turns: [StoredTurn]) {
-        conversations.save(id: conversationID, turns: turns, modelName: backend.displayName)
+        conversations.save(id: conversationID, turns: turns, modelName: backend.displayName,
+                           tainted: taintedConversations.contains(conversationID))
         if let c = conversations.load(conversationID),
            c.turns[c.reflectedTurnCount...].filter({ $0.role == .user }).count >= Self.reflectEveryUserTurns {
             scheduleBackgroundWork(includeActive: true)
@@ -154,6 +183,7 @@ final class MemoryHarness {
 
     func conversationEnded(_ id: UUID) {
         injected[id] = nil
+        taintedConversations.remove(id)   // already persisted on the conversation
         reporter.invalidate()
         scheduleBackgroundWork(includeActive: false)
     }
@@ -180,7 +210,13 @@ final class MemoryHarness {
     func preemptBackgroundWork() async {
         guard let task = backgroundTask else { return }
         task.cancel()
-        _ = try? await withTimeout(5) { await task.value }
+        // Race the task against a timer with a continuation: a task group would
+        // wait for the un-cancellable `task.value` child and defeat the bound.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let once = ResumeOnce(cont)
+            Task { await task.value; once.resume() }
+            Task { try? await Task.sleep(nanoseconds: 5_000_000_000); once.resume() }
+        }
     }
 
     func scheduleBackgroundWork(includeActive: Bool) {
@@ -236,7 +272,7 @@ final class MemoryHarness {
             try Task.checkCancellation()
             switch result {
             case .success(let r):
-                try await apply(r, from: conv)
+                try await apply(r, from: conv, previousUntrusted: previous?.trust == .untrusted)
                 status = "Learned from “\(conv.title)”"
             case .failure(let why):
                 status = "Reflection skipped (\(why))"
@@ -252,8 +288,9 @@ final class MemoryHarness {
 
     /// Stores a validated reflection. Chats containing remote text produce
     /// untrusted memories and only *pending* playbook edits (user approves).
-    private func apply(_ r: ReflectionResult, from conv: StoredConversation) async throws {
-        let tainted = conv.containsRemoteText
+    private func apply(_ r: ReflectionResult, from conv: StoredConversation,
+                       previousUntrusted: Bool) async throws {
+        let tainted = conv.containsRemoteText || previousUntrusted
         let trust: MemoryTrust = tainted ? .untrusted : .model
         for f in r.facts {
             _ = try? await memories.upsert(MemoryRecord(kind: f.kind, text: f.text, sourceConversation: conv.id,
@@ -340,6 +377,7 @@ final class MemoryHarness {
     }
 
     func isTainted(_ conversationID: UUID) -> Bool {
+        if taintedConversations.contains(conversationID) { return true }
         guard let agent, agent.conversationID == conversationID else {
             return conversations.load(conversationID)?.containsRemoteText ?? false
         }
@@ -396,6 +434,6 @@ final class MemoryHarness {
         }
         try await playbook.enqueuePending(Array(edits), source: nil)
         changed()
-        return "Imported \(n) memories; \(edits.count) playbook notes await your approval."
+        return "Imported \(n) memories (marked untrusted; editing one makes it yours);\(edits.count) playbook notes await your approval."
     }
 }

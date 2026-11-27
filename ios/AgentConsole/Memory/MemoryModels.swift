@@ -163,8 +163,12 @@ struct StoredConversation: Codable, Identifiable, Hashable, Sendable {
     var turns: [StoredTurn]
     /// Turns [0, reflectedTurnCount) have already been through reflection.
     var reflectedTurnCount: Int
+    /// Set once untrusted text entered the model's context in this chat
+    /// (untrusted memories injected or recalled, imported-document summaries).
+    /// Optional so files written before this field still decode.
+    var tainted: Bool?
 
-    var containsRemoteText: Bool { turns.contains(where: \.remote) }
+    var containsRemoteText: Bool { tainted == true || turns.contains(where: \.remote) }
 }
 
 /// Lightweight row for the conversations list (the index file holds only these).

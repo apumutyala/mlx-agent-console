@@ -44,11 +44,13 @@ struct ConversationsView: View {
                     .disabled(agent.isRunning)
                     .swipeActions {
                         Button("Delete", systemImage: "trash", role: .destructive) { deleting = c }
+                            .disabled(c.id == agent.conversationID && agent.isRunning)
                         Button("Rename", systemImage: "pencil") { newTitle = c.title; renaming = c }
                     }
                     .contextMenu {
                         Button("Rename", systemImage: "pencil") { newTitle = c.title; renaming = c }
                         Button("Delete", systemImage: "trash", role: .destructive) { deleting = c }
+                            .disabled(c.id == agent.conversationID && agent.isRunning)
                     }
                 }
             }
@@ -73,7 +75,7 @@ struct ConversationsView: View {
                                                                            set: { if !$0 { deleting = nil } }),
                                 titleVisibility: .visible) {
                 Button("Delete chat", role: .destructive) {
-                    if let c = deleting {
+                    if let c = deleting, !(c.id == agent.conversationID && agent.isRunning) {
                         if c.id == agent.conversationID { agent.reset() }
                         store.delete(c.id)
                     }

@@ -17,8 +17,27 @@ final class ConversationStore {
     init(dir: URL = AtomicJSON.directory("conversations")) {
         self.dir = dir
         indexURL = dir.appending(path: "index.json")
-        summaries = (AtomicJSON.read([ConversationSummary].self, from: indexURL) ?? [])
+        summaries = (AtomicJSON.readArray(ConversationSummary.self, from: indexURL) ?? [])
             .sorted { $0.updatedAt > $1.updatedAt }
+        rebuildMissingSummaries()
+    }
+
+    /// Index missing, set aside, or behind the files on disk: re-list every
+    /// transcript so none is orphaned.
+    private func rebuildMissingSummaries() {
+        let known = Set(summaries.map(\.id))
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        var added = false
+        for f in files where f.pathExtension == "json" {
+            guard let id = UUID(uuidString: f.deletingPathExtension().lastPathComponent), !known.contains(id),
+                  let c = load(id) else { continue }
+            summaries.append(Self.summary(c))
+            added = true
+        }
+        if added {
+            summaries.sort { $0.updatedAt > $1.updatedAt }
+            saveIndex()
+        }
     }
 
     private func fileURL(_ id: UUID) -> URL { dir.appending(path: "\(id.uuidString).json") }
@@ -28,7 +47,7 @@ final class ConversationStore {
     /// Saves the transcript (creating the conversation on first save) and
     /// returns the stored version. Empty transcripts aren't persisted.
     @discardableResult
-    func save(id: UUID, turns: [StoredTurn], modelName: String) -> StoredConversation? {
+    func save(id: UUID, turns: [StoredTurn], modelName: String, tainted: Bool = false) -> StoredConversation? {
         guard turns.contains(where: { $0.role == .user }) else { return nil }
         let capped = turns.map { t -> StoredTurn in
             var t = t
@@ -43,6 +62,7 @@ final class ConversationStore {
         conv.updatedAt = .now
         conv.modelName = modelName
         conv.reflectedTurnCount = min(conv.reflectedTurnCount, capped.count)
+        if tainted || conv.tainted == true { conv.tainted = true }   // sticky
         if !conv.titleIsCustom { conv.title = Self.autoTitle(capped) }
         write(conv)
         return conv
@@ -83,10 +103,7 @@ final class ConversationStore {
 
     private func write(_ conv: StoredConversation) {
         try? AtomicJSON.write(conv, to: fileURL(conv.id))
-        let preview = conv.turns.last(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
-            ?? conv.turns.last?.text ?? ""
-        let summary = ConversationSummary(id: conv.id, title: conv.title, updatedAt: conv.updatedAt,
-                                          turnCount: conv.turns.count, preview: String(preview.prefix(140)))
+        let summary = Self.summary(conv)
         summaries.removeAll { $0.id == conv.id }
         summaries.insert(summary, at: 0)
         if summaries.count > Self.maxConversations {
@@ -95,6 +112,13 @@ final class ConversationStore {
             summaries = Array(summaries.prefix(Self.maxConversations))
         }
         saveIndex()
+    }
+
+    static func summary(_ conv: StoredConversation) -> ConversationSummary {
+        let preview = conv.turns.last(where: { $0.role == .assistant && !$0.text.isEmpty })?.text
+            ?? conv.turns.last?.text ?? ""
+        return ConversationSummary(id: conv.id, title: conv.title, updatedAt: conv.updatedAt,
+                                   turnCount: conv.turns.count, preview: String(preview.prefix(140)))
     }
 
     private func saveIndex() { try? AtomicJSON.write(summaries, to: indexURL) }

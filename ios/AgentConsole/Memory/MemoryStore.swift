@@ -15,7 +15,7 @@ actor MemoryStore {
 
     init(url: URL = AtomicJSON.directory("store").appending(path: "memories.json")) {
         self.url = url
-        records = AtomicJSON.read([MemoryRecord].self, from: url) ?? []
+        records = AtomicJSON.readArray(MemoryRecord.self, from: url) ?? []
     }
 
     // MARK: Reading
@@ -112,19 +112,18 @@ actor MemoryStore {
 
     // MARK: Export / import
 
-    /// Merges imported records: same id replaces, otherwise normal upsert
-    /// (dedupe). Imported text keeps its trust, except `.user` is downgraded to
-    /// `.model` — a file isn't the user typing. Returns how many were taken.
+    /// Adds imported records. A file isn't the user typing, so whatever it
+    /// claims, records come in as `.untrusted`, unpinned, with fresh ids and no
+    /// embeddings; near-duplicates merge (never replacing existing text by id).
+    /// Returns how many were taken.
     func importRecords(_ incoming: [MemoryRecord]) throws -> Int {
         var taken = 0
-        for var r in incoming.prefix(Self.cap * 2) {
-            guard let text = MemoryText.clean(r.text), !MemoryText.looksLikeControlMarkup(text) else { continue }
-            r.text = text
-            r.importance = min(max(r.importance, 1), 5)
-            if r.trust == .user { r.trust = .model }
-            if let i = records.firstIndex(where: { $0.id == r.id }) {
-                records[i] = r
-            } else if let i = MemoryMaintenance.mergeTarget(for: r, in: records) {
+        for src in incoming.prefix(Self.cap) {
+            guard let text = MemoryText.clean(src.text), !MemoryText.looksLikeControlMarkup(text) else { continue }
+            let kind: MemoryKind = src.kind
+            let r = MemoryRecord(kind: kind, text: text, sourceConversation: nil, createdAt: src.createdAt,
+                                 importance: src.importance, pinned: false, trust: .untrusted)
+            if let i = MemoryMaintenance.mergeTarget(for: r, in: records) {
                 records[i] = MemoryMaintenance.merge(records[i], with: r)
             } else {
                 records.append(r)

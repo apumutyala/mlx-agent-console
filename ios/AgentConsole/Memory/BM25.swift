@@ -143,7 +143,12 @@ enum VectorMath {
 enum MemoryRanker {
     struct Scored: Sendable {
         let record: MemoryRecord
+        /// Ranking score (relative: keyword part normalised to the best hit).
         let score: Double
+        /// Absolute relevance in 0...1 for thresholds: the share of the
+        /// query's IDF mass this record matches, or the rescaled cosine when
+        /// that is higher. Independent of the other records.
+        let relevance: Double
     }
 
     /// Weight of the embedding similarity when both signals exist.
@@ -156,6 +161,8 @@ enum MemoryRanker {
         let index = BM25Index(records.map { ($0.id, $0.text) })
         let keyword = Dictionary(index.search(query).map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) })
         let maxKeyword = keyword.values.max() ?? 0
+        let qTerms = Set(TextTokenizer.terms(query))
+        let qMass = qTerms.reduce(0.0) { $0 + index.idf($1) }
 
         var out: [Scored] = []
         for r in records {
@@ -166,11 +173,17 @@ enum MemoryRanker {
                 sem = c > semanticFloor ? (c - semanticFloor) / (1 - semanticFloor) : 0
             }
             let relevance = queryVector == nil ? kw : (1 - semanticWeight) * kw + semanticWeight * sem
+            var coverage = 0.0
+            if qMass > 0, keyword[r.id] != nil {
+                let docTerms = Set(TextTokenizer.terms(r.text))
+                coverage = qTerms.intersection(docTerms).reduce(0.0) { $0 + index.idf($1) } / qMass
+            }
             guard relevance > 0 || r.pinned else { continue }
             let days = now.timeIntervalSince(r.updatedAt) / 86_400
             let recency = exp(-max(days, 0) / 60)                     // ~2-month memory
             let boost = 0.75 + 0.05 * Double(r.importance) + 0.1 * recency + (r.pinned ? 0.2 : 0)
-            out.append(Scored(record: r, score: max(relevance, r.pinned ? 0.15 : 0) * boost))
+            out.append(Scored(record: r, score: max(relevance, r.pinned ? 0.15 : 0) * boost,
+                              relevance: max(coverage, sem)))
         }
         return out.sorted { $0.score == $1.score ? $0.record.updatedAt > $1.record.updatedAt : $0.score > $1.score }
     }
