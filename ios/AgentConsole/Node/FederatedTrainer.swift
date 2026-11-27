@@ -59,7 +59,9 @@ actor FederatedTrainer {
     }
 
     private struct Applied {
-        let container: ObjectIdentifier
+        /// Weak, not ObjectIdentifier: once the converted container is freed (model
+        /// switch, benchmark), a new container at a reused address must not match.
+        weak var container: ModelContainer?
         let rank: Int
         let layers: Int
         let seed: Int
@@ -74,7 +76,7 @@ actor FederatedTrainer {
     nonisolated var modelID: String { backend.modelID }
 
     /// "rank 8 · 8 layers", or nil before any conversion.
-    var adapterSummary: String? { applied.map { "rank \($0.rank) · \($0.layers) layers" } }
+    var adapterSummary: String? { applied.flatMap { $0.container == nil ? nil : $0 }.map { "rank \($0.rank) · \($0.layers) layers" } }
 
     private func container() throws -> ModelContainer {
         guard let c = backend.modelContainer else { throw TrainerError.notLoaded }
@@ -85,7 +87,7 @@ actor FederatedTrainer {
     /// (a model switch or reload replaces it with an unconverted one).
     private func convertedContainer() throws -> ModelContainer {
         let c = try container()
-        guard let a = applied, a.container == ObjectIdentifier(c) else { throw TrainerError.noAdapter }
+        guard let a = applied, a.container === c else { throw TrainerError.noAdapter }
         return c
     }
 
@@ -94,8 +96,7 @@ actor FederatedTrainer {
     @discardableResult
     func ensureAdapter(rank: Int, layers: Int, seed: Int) async throws -> Bool {
         let c = try container()
-        let id = ObjectIdentifier(c)
-        if let a = applied, a.container == id {
+        if let a = applied, a.container === c {
             guard a.rank == rank, a.layers == layers else {
                 throw TrainerError.adapterShape(have: "rank \(a.rank), \(a.layers) layers",
                                                 want: "rank \(rank), \(layers) layers")
@@ -117,7 +118,7 @@ actor FederatedTrainer {
             try ctx.model.prepare()
             return try saveToData(arrays: Dictionary(uniqueKeysWithValues: ctx.model.trainableParameters().flattened()))
         }
-        applied = Applied(container: id, rank: rank, layers: layers, seed: seed, initial: initial)
+        applied = Applied(container: c, rank: rank, layers: layers, seed: seed, initial: initial)
         return true
     }
 
@@ -131,7 +132,9 @@ actor FederatedTrainer {
 
     /// Back to the seeded initial adapter (first round of a federation).
     func resetToInitial(seed: Int) async throws {
-        guard let a = applied else { throw TrainerError.noAdapter }
+        guard let a = applied, let held = a.container, held === backend.modelContainer else {
+            throw TrainerError.noAdapter
+        }
         guard a.seed == seed else { throw TrainerError.seedMismatch(have: a.seed, want: seed) }
         try await loadAdapter(a.initial)
     }

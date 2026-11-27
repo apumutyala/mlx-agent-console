@@ -13,6 +13,8 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     private var container: ModelContainer?
     /// Bumped on every switch so a load that finishes late can't install a stale model.
     private var epoch = 0
+    /// Set while a benchmark runs (see Benchmark mode below).
+    private var benchmarkEntry: ModelCatalog.Entry?
     private let lock = NSLock()
 
     init(entry: ModelCatalog.Entry = ModelCatalog.selected) {
@@ -52,11 +54,17 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         reconcileSelection()
     }
 
-    /// Unload if the persisted selection differs from what's loaded.
-    private func reconcileSelection() {
-        let wanted = ModelCatalog.selected
+    /// The entry the backend should hold: the benchmark target while a benchmark
+    /// runs, otherwise the persisted selection.
+    private var wantedEntry: ModelCatalog.Entry {
+        lock.withLock { benchmarkEntry } ?? ModelCatalog.selected
+    }
+
+    /// Unload if the wanted entry differs from what's loaded (or always, with `force`).
+    private func reconcileSelection(force: Bool = false) {
+        let wanted = wantedEntry
         let changed: Bool = lock.withLock {
-            guard wanted.id != entry.id else { return false }
+            guard force || wanted.id != entry.id else { return false }
             entry = wanted
             container = nil   // conversations still holding the old container keep it alive until they end
             epoch += 1
@@ -65,6 +73,9 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         if changed { MLX.Memory.clearCache() }
     }
 
+    /// MLX's free-buffer cache limit on iPad; weights dominate memory.
+    static let mlxCacheLimit = 32 * 1024 * 1024
+
     /// Loads inline, in the caller's task, so cancelling the caller (pause,
     /// Serve off, chat Stop) cancels the download. Every caller holds `GPUGate`,
     /// which serializes loads; a weight read that can't be interrupted simply
@@ -72,10 +83,11 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     /// overlap it. A container that is already published is never replaced.
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         reconcileSelection()
-        if await isLoaded { progress(1); return }
+        // After reconciling, `entry` is the wanted one (the selection, or a benchmark target).
+        if lock.withLock({ container != nil }) { progress(1); return }
         let (target, startEpoch) = lock.withLock { (entry, epoch) }
         // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-        MLX.Memory.cacheLimit = 32 * 1024 * 1024
+        MLX.Memory.cacheLimit = Self.mlxCacheLimit
         let loaded = try await #huggingFaceLoadModelContainer(
             configuration: Self.configuration(for: target),
             progress: .download { p in progress(p.fractionCompleted) }
@@ -85,6 +97,46 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
             if epoch == startEpoch, container == nil { container = loaded }
         }
         progress(1)
+    }
+
+    // MARK: Benchmark mode
+    //
+    // Benchmarks load through `load` above (the one load path), so whatever it does
+    // (single-flight, draining, VLM loaders, memory budgets) applies to measured models
+    // too. The caller holds GPUGate for the whole benchmark.
+
+    /// Until `endBenchmark()`, serve `entry` instead of the persisted selection. The
+    /// selection itself is not changed. Drops whatever is loaded (chat model, adapters).
+    func beginBenchmark(_ entry: ModelCatalog.Entry) {
+        lock.withLock { benchmarkEntry = entry }
+        reconcileSelection(force: true)
+    }
+
+    /// Load the benchmark target through `load` and return its container.
+    func loadBenchmarkModel(progress: @escaping @Sendable (Double) -> Void) async throws -> ModelContainer {
+        try await load(progress: progress)
+        guard let c = modelContainer else { throw BackendError.notLoaded }
+        return c
+    }
+
+    /// Drop the benchmark target's weights (before a warm reload). The caller must
+    /// also drop its own reference for the memory to be freed.
+    func dropBenchmarkModel() { reconcileSelection(force: true) }
+
+    /// Leave benchmark mode; the chat model reloads on its next `load`.
+    func endBenchmark() {
+        lock.withLock { benchmarkEntry = nil }
+        reconcileSelection(force: true)
+    }
+
+    /// Generation parameters a benchmark decodes with: the same per-entry settings chat
+    /// uses (put entry-specific prefill / memory settings here as they're added), greedy.
+    static func benchmarkParameters(for entry: ModelCatalog.Entry, maxTokens: Int, seed: UInt64) -> GenerateParameters {
+        var params = GenerateParameters()
+        params.maxTokens = maxTokens
+        params.temperature = 0          // greedy (argmax sampler)
+        params.seed = seed
+        return params
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {

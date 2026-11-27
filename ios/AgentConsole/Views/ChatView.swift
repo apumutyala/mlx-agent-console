@@ -54,8 +54,9 @@ struct ChatView: View {
             .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
                 guard !(await backend.isLoaded) else { return }
-                // Loading goes through the GPU gate like all model work, so it
-                // can't race a fleet task's load or LoRA conversion.
+                // Loading goes through the GPU gate like all model work, so it can't race
+                // a fleet task's load, a LoRA conversion or a benchmark (which owns the
+                // GPU and memory; in benchmark mode `load` serves the benchmark entry).
                 do { try await GPUGate.shared.acquire("chat load") } catch { return }
                 loadProgress = 0
                 try? await backend.load { p in Task { @MainActor in loadProgress = p } }

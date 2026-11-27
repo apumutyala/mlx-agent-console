@@ -48,6 +48,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | QR pairing (`worker/pair.ps1`) | not yet | no | VisionKit scanner |
 | Inkling 2 Mini | in progress | no | see findings below |
 | Memory harness + document tools | in progress | no | |
+| Bench tab + receipts (`bench`) | see PR | no | worker `/receipts` + `list_receipts` tests pass |
 
 ## Findings
 
@@ -122,7 +123,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 | # | Item | Expected lever | Status |
 |---|---|---|---|
-| O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | todo |
+| O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | profiler built (`bench` PR); device run pending |
 | O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | todo; upstream candidate |
 | O3 | Inkling expert streaming / mmap of routed experts | fits 8–12 GB devices, frees RAM | research |
 | O4 | KV cache quantization / smaller prefill step on iPad | memory headroom, longer context | todo |
@@ -138,6 +139,23 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: `bench` review fixes (PR #7: 11 confirmed findings) and workload set `w2`
+- **Foreground only:**
+  - The idle timer is disabled while a run is going.
+  - Leaving `.active` stops the run at the next decode step (cancellation is checked before every token), with a short background grace period. The model in progress is saved as an `aborted` receipt.
+- **One load path:** benchmarks go through `MLXBackend.load` in a benchmark mode (`beginBenchmark` / `loadBenchmarkModel` / `dropBenchmarkModel` / `endBenchmark`). The static `loadContainer`/`unload` are gone, so the single-flight, VLM and memory-budget work in #2/#6 applies to measured models too. The decode parameters come from `MLXBackend.benchmarkParameters(for:)`, which is where per-entry prefill settings belong.
+- **Chat load gated:** ChatView's model load now takes `GPUGate`.
+- **Memory before a run:** the memory embedder is released before a run. A receipt gets a `warnings` entry when more than 64 MB of MLX memory is still held before loading.
+- **Federated adapter:** `FederatedTrainer` holds the converted container weakly, so a benchmark reload can't match a reused address. Settings says when a benchmark dropped the applied adapter.
+- **Uploads:** an uploaded marker is kept per receipt, and pending receipts are retried when the Bench tab opens. The worker dedupes on `receipt_id`.
+- **Worker:**
+  - Receipt shape is validated. Only UTF-8 JSON is accepted: no BOM, no NaN or Infinity. Receipts are stored canonically.
+  - Names are `<stamp>-<seq:04d>-<model>.json`, so newest-first ordering is right.
+  - Listing comes from an in-memory index; unreadable files are skipped and reported.
+  - Bodies over 256 KB are refused unread, and the connection is closed (POST as well as PUT).
+  - `list_receipts` keeps its untrusted-data note first and keeps the output under the text budget as valid JSON.
+- **`w2`:** an untimed warm-up decode at each workload's own prompt length, because the first device receipts (w1) showed rep 1 of the 1K and 4K workloads paying Metal compile time, for example LFM3 1K prefill at 864 vs 3341 tok/s. A 10 s idle settle now runs before the footprint baseline. Prompts are unchanged.
 
 ### 2026-11-26 (night): `fix-node`, review fixes for the iPad compute node
 - **Scope:** the 20 confirmed findings in `docs/review/2026-11-26-ios-node.json`, plus the device half of the HIGH privacy finding in `docs/review/2026-11-26-worker.json` (federated.py:171). The worker Python side is a separate agent's job; no `worker/*.py` edits here.
@@ -167,6 +185,21 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 - **Recordings:** at the 2-minute cap, the recording stops, is transcribed and is sent. A failed ASR download keeps the recording, with Send recording / Discard buttons. Whisper is prefetched while the user talks.
 - **Memory:** `Xybrid.releaseMemory()` and dropped model references on a memory warning, and when an LLM of 3 GB or more is selected. `setAutoRelease(true)` is also set.
 - **Verification:** compiled in CI only; nothing has run on a device.
+
+### 2026-11-26: `bench` (on-device profiler + receipts, backlog O1)
+- **App:** new Bench tab. It runs the fixed workload set `w1` on one catalog entry or on every entry: `short-128` (short prompt → 128 tokens), `1k-256` (1024 prompt tokens → 256), `4k-256` (4096 → 256).
+  - Prompts are raw token ids with no chat template, cut to an exact length per model from a bundled synthetic text (SplitMix64, seeded). Decoding is greedy with seed 1234, and every rep decodes exactly `max_tokens`; the first stop-token index is recorded.
+  - Each run makes a first load (flagged when download progress was seen) and a warm reload, then an 8-token warm-up, then N=3 reps per workload, reporting the median and min/max.
+  - Metrics per rep: TTFT, prefill tok/s, decode tok/s (first token excluded), and mlx-swift-lm's own `promptPrefillTime`. Memory: `phys_footprint` peak sampled every 50 ms, `os_proc_available_memory` min/before/after, and MLX active/peak/cache. Also thermal before/after/max, battery, and Low Power Mode.
+  - Output fingerprint: SHA-256 of the first 64 greedy token ids, plus a check that all reps match.
+  - The token loop drives `TokenIterator` directly, not `generate`, so EOS can't shorten a run. Timing uses the same clock points as `GenerateCompletionInfo`.
+- **Receipts:** schema v1 JSON in Application Support/receipts. They can be exported from the share sheet and are POSTed to the worker when one is configured. Models that don't fit (weights + 1.5 GB headroom > available memory, or below the catalog minimum) get a `skipped` receipt with the reason.
+  - New catalog entries are benchmarked automatically. `MLXBackend.loadContainer(for:)` is now the single load path; `inkling2` should put any special loading there.
+- **Fleet:** new `bench` task kind (payload `model_id`, `workload_ids`, `repetitions`). The node completes it with the receipt JSON as output and per-workload metrics.
+- **Worker:** `POST/GET /receipts` and `GET /receipts/<name>` (`worker/receipts.py`, max 256 KB, schema 1, never overwritten), plus a read-only MCP tool `list_receipts`. CI now also runs `test_fleet`.
+- **Build SHA:** `APP_GIT_SHA` build setting → Info.plist `AppGitSHA`. CI passes `GITHUB_SHA`.
+- **Not run on a device yet.** No numbers exist yet. The first device run produces the baseline for O2–O6.
+
 ### 2026-11-26 (night): review → fixes → PRs
 - **Review results:** the review workflow (149 agents) confirmed 43 findings: 6 high, 22 medium, 15 low. They are split by area in `docs/review/2026-11-26-*.json`, and 5 were rejected.
 - **PRs:**

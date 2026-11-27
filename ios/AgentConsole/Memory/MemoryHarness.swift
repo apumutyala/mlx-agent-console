@@ -121,6 +121,14 @@ final class MemoryHarness {
         }
     }
 
+    /// A benchmark needs the memory to itself: stop background work and drop the
+    /// embedder. It loads again at the next idle moment after a chat.
+    func releaseForBenchmark() async {
+        await preemptBackgroundWork()
+        await embedder.unload()
+        embedderLoaded = false
+    }
+
     private func changed() { revision += 1 }
 
     // MARK: Context assembly

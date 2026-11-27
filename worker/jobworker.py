@@ -441,8 +441,8 @@ def make_handler(worker: Worker, token: str, router=None):
             if out is None:
                 return False
             status, body = out
-            if method == "PUT" and status >= 400:
-                # The upload body may be unread; don't reuse this connection.
+            if method in ("PUT", "POST") and status >= 400:
+                # The request body may be unread (e.g. refused for size); don't reuse this connection.
                 self.close_connection = True
             if isinstance(body, Path):
                 self._send_file(body)
