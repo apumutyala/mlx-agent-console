@@ -133,14 +133,36 @@ enum ModelCatalog {
         return entry
     }
 
-    /// 32 of 128 experts per layer resident: ~3.4 GB weights. Fits without the
-    /// increased-memory-limit entitlement; slowest (most misses).
-    static let inkling2MiniStream25 = inklingStreamed(
-        id: "inkling2-mini-dwq3.1-stream25", name: "Inkling 2 Mini · streamed 25%", fraction: 0.25,
-        minimumMemoryGB: 7,
-        note: "The 3.1-bit DWQ build with 25% of experts in memory, the rest read from storage. "
-            + "Smallest footprint; experimental.")
-    /// 64 of 128 resident: ~5.5 GB weights.
+    // Budget on the free-sideload iPad (device receipt 2026-11-27): per-app limit ≈ 5.3–5.5 GB,
+    // target footprint ≤ 4.6 GB. One slot across all 24 layers costs 64.36 MB. With the 1.36 GB core,
+    // KV ≈ 0.2 GB at 4K tokens, prefill scratch ≈ 0.25 GB at 256-token steps and ≈ 0.2 GB runtime,
+    // 32 slots (2.06 GB) come to ≈ 4.1 GB and 24 slots (1.54 GB) to ≈ 3.6 GB. 8K context adds
+    // ≈ 0.2 GB, which still fits at 32 slots (≈ 4.3 GB).
+
+    /// 32 of 128 experts per layer resident (3.42 GB weights): the largest tier that fits the
+    /// ~5.3 GB free-sideload limit with headroom. 4K context and 256-token prefill steps keep the
+    /// rest of the footprint small.
+    static let inkling2MiniStream25: Entry = {
+        var e = inklingStreamed(
+            id: "inkling2-mini-dwq3.1-stream25", name: "Inkling 2 Mini · streamed 25%", fraction: 0.25,
+            minimumMemoryGB: 7,
+            note: "The 3.1-bit DWQ build with 25% of experts in memory, the rest read from storage. "
+                + "Fits the default per-app memory limit; experimental.")
+        e.contextTokens = 4096
+        e.prefillStepSize = 256
+        return e
+    }()
+    /// 24 of 128 (2.90 GB weights): fallback if the 25% tier is killed for memory.
+    static let inkling2MiniStream19: Entry = {
+        var e = inklingStreamed(
+            id: "inkling2-mini-dwq3.1-stream19", name: "Inkling 2 Mini · streamed 19%", fraction: 0.1875,
+            minimumMemoryGB: 7,
+            note: "Like the 25% tier with fewer experts in memory: ~0.5 GB smaller, slower.")
+        e.contextTokens = 4096
+        e.prefillStepSize = 256
+        return e
+    }()
+    /// 64 of 128 resident: ~5.5 GB weights. Needs the increased-memory-limit entitlement.
     static let inkling2MiniStream50 = inklingStreamed(
         id: "inkling2-mini-dwq3.1-stream50", name: "Inkling 2 Mini · streamed 50%", fraction: 0.5,
         minimumMemoryGB: 7,
@@ -154,7 +176,8 @@ enum ModelCatalog {
             + "resident DWQ build exactly.")
 
     static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3,
-                                        inkling2MiniStream25, inkling2MiniStream50, inkling2MiniStream100]
+                                        inkling2MiniStream25, inkling2MiniStream19, inkling2MiniStream50,
+                                        inkling2MiniStream100]
 
     static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
     static let defaultEntry = lfm3_1_7b

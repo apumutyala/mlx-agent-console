@@ -195,6 +195,9 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         params.temperature = StreamingDiagnostics.greedy ? 0 : current.temperature
         if let context = current.contextTokens { params.maxKVSize = context }
         if let step = current.prefillStepSize { params.prefill.stepSize = step }
+        if current.streamed != nil, StreamingDiagnostics.exactPrefill {
+            params.prefill.stepSize = StreamingDiagnostics.exactPrefillStep
+        }
         var context: [String: any Sendable]? = nil
         if let effort = current.reasoningEffort { context = ["reasoning_effort": effort] }
         var specs: [ToolSpec]? = nil

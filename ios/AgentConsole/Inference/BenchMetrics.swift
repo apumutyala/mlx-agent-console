@@ -50,6 +50,13 @@ enum StreamingDiagnostics {
     static let greedyKey = "inference.greedy"
     static var greedy: Bool { UserDefaults.standard.bool(forKey: greedyKey) }
 
+    /// When on, streamed tiers prefill `exactPrefillStep` tokens at a time. Then no call needs more
+    /// distinct experts (3 x 8 = 24) than the smallest tier has slots, nothing is chunked, and
+    /// every streamed tier computes bit-identical tokens: the on-device exactness gate.
+    static let exactPrefillKey = "inkling.exactPrefill"
+    static var exactPrefill: Bool { UserDefaults.standard.bool(forKey: exactPrefillKey) }
+    static let exactPrefillStep = 3
+
     /// Application Support/Diagnostics/inkling-routing.jsonl (appended across loads).
     static var traceURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

@@ -153,6 +153,7 @@ private struct StreamingSection: View {
     @AppStorage(StreamedModelStore.baseURLKey) private var baseURL = ""
     @AppStorage(StreamingDiagnostics.traceKey) private var trace = false
     @AppStorage(StreamingDiagnostics.greedyKey) private var greedy = false
+    @AppStorage(StreamingDiagnostics.exactPrefillKey) private var exactPrefill = false
 
     static func rows() -> [(String, String)] {
         let m = BenchMetricsRegistry.collect()
@@ -182,6 +183,7 @@ private struct StreamingSection: View {
                 .font(.footnote)
             Toggle("Record routing trace", isOn: $trace)
             Toggle("Greedy decoding (correctness gate)", isOn: $greedy)
+            Toggle("Exact prefill, 3 tokens per step (gate)", isOn: $exactPrefill)
             TimelineView(.periodic(from: .now, by: 2)) { _ in
                 MemoryReadout(rows: Self.rows())
             }

@@ -5,12 +5,26 @@ are read from `experts.bin` on a miss, with `F_NOCACHE` `preadv` straight into t
 The design and its sources are in the research note `INKLING-SSD-EXPERT-STREAMING-DESIGN.md`
 (stage plan M0 to M5).
 
-| Tier (catalog id) | Slots per layer | Expert memory | Weights resident |
-|---|---|---|---|
-| `inkling2-mini-dwq3.1-stream25` | 32 | 2.06 GB | 3.42 GB |
-| `inkling2-mini-dwq3.1-stream50` | 64 | 4.12 GB | 5.48 GB |
-| `inkling2-mini-dwq3.1-stream100` (gate) | 128 | 8.24 GB | 9.60 GB |
-| `inkling2-mini-dwq3.1` (resident, reference) | n/a | 8.24 GB | 9.60 GB |
+| Tier (catalog id) | Slots per layer | Expert memory | Weights resident | Est. footprint | Fits a free sideload (~5.3 GB)? |
+|---|---|---|---|---|---|
+| `inkling2-mini-dwq3.1-stream19` | 24 | 1.54 GB | 2.90 GB | ~3.6 GB (4K) | yes |
+| `inkling2-mini-dwq3.1-stream25` | 32 | 2.06 GB | 3.42 GB | ~4.1 GB (4K), ~4.3 GB (8K) | yes, the largest that does |
+| `inkling2-mini-dwq3.1-stream50` | 64 | 4.12 GB | 5.48 GB | ~6.4 GB | no (needs increased-memory-limit) |
+| `inkling2-mini-dwq3.1-stream100` | 128 | 8.24 GB | 9.60 GB | ~10.5 GB | no |
+| `inkling2-mini-dwq3.1` (resident) | n/a | 8.24 GB | 9.60 GB | ~10.5 GB | no |
+
+**Budget on the free-sideload iPad** (device receipt 2026-11-27): `os_proc_available_memory()` is
+about 5.2 GB before the load, so the per-app limit is about 5.3–5.5 GB and the entitlement is not
+in effect. The footprint target is ≤ 4.6 GB.
+
+- One slot across all 24 layers costs 64.36 MB (the DWQ record sizes summed over the layers).
+- Footprint = 1.36 GB core (embed, head, attention, norms; the vision tower is loaded only on
+  demand) + S × 64.36 MB + KV (~0.2 GB at 4K, ~0.4 GB at 8K) + prefill scratch (~0.25 GB at
+  256-token steps) + ~0.2 GB runtime.
+- **S = 32 (25%) is the largest slot count that fits with headroom.** At 4K context S ≈ 36 would
+  still fit; at 8K, S = 32 is the limit.
+- The KV, scratch and runtime terms are estimates. Settings → Memory → *Last large load* shows the
+  measured peak.
 
 All of these use the same bytes: `LocallyInferred/Inkling-2-Mini-MLX-3.1bpw-DWQ` at
 `41debd25a0558fc9d127172dbb3da210cf7fb681`, repacked byte-exactly. The sizes come from its
@@ -66,6 +80,30 @@ Only regular files directly inside `<models-dir>/<name>/` are served. Symlinks, 
 
 This gate is designed but **not run yet**: nothing has run on a device.
 
+On a free sideload, no resident or 100% tier fits, so the gate has two parts.
+
+**(a) On device, offload changes nothing.** With *Exact prefill* on, prefill runs 3 tokens per step.
+A call then needs at most 24 distinct experts, so nothing is chunked. Every streamed tier then
+computes the same math a resident model would with that step; only the slot ids differ.
+
+1. Turn on *Greedy decoding* and *Exact prefill*.
+2. For each gate prompt, start a new chat on `stream19`, then on `stream25`.
+3. **Pass:** every token is identical. The two tiers differ in which experts are resident, which
+   ones miss and which slots get evicted, so this exercises the IO, the eviction and the remap.
+
+**(b) Against a reference.** Run the same DWQ build in mlx-lm on a Mac or a Linux CPU box
+(PR #2086) at temperature 0 with the same chat template and prefill step 3.
+- **Pass:** the ten-token gate, greedy-matching tokens 1–9.
+- Logit cosine is not exported by the app yet.
+- Without *Exact prefill*, prefill is chunked expert-major whenever a call needs more than S
+  distinct experts. That regroups matmul rows and may change rounding, so record the first
+  mismatch index.
+
+On a device where the resident build fits (entitlement granted), the original gate also applies:
+`stream100` vs `inkling2-mini-dwq3.1`, identical tokens.
+
+With the entitlement granted, the full gate is:
+
 1. **Load the resident reference.** Turn on Settings → *Inkling expert streaming* → *Greedy
    decoding*. Load `inkling2-mini-dwq3.1` and send each gate prompt in a new chat. Save the
    transcripts.
@@ -90,11 +128,10 @@ benchmark screen and 128 generated tokens:
 
 | # | Run | Record |
 |---|---|---|
-| A | resident `inkling2-mini-dwq3.1`, trace **on** | tok/s, TTFT, peak (Settings), and the trace file |
-| B | `stream100` | tok/s, TTFT, peak; hit rate after warm-up must reach 100% |
-| C | `stream50` | tok/s, TTFT, peak, hit rate, bytes read, read GB/s, routing wait, GPU sync |
-| D | `stream25` | same as C |
-| E | Settings → Memory, under the real signing | `os_proc_available_memory()` ("Available to app") |
+| A | `stream25`, trace **on** | tok/s, TTFT, peak (Settings), counters, and the trace file. Routing does not depend on residency, so this trace serves every S in the simulator. |
+| B | `stream19` | tok/s, TTFT, peak, counters |
+| C | `stream25`, *Exact prefill* on, two prompts | gate (a) together with B |
+| D | IO microbenchmark | `inkling_stream.read_gb_per_s` after A. It is the effective `preadv` bandwidth at 4 readers. |
 
 - Between phases, use *Reset counters* (or `BenchMetricsRegistry.resetAll()`). The
   `inkling_stream.*` keys from `BenchMetricsRegistry.collect()` belong in each receipt.
