@@ -103,6 +103,22 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
+### 2026-11-26 (night): `fix-speech`, speech review findings
+- **Branch:** `fix-speech` from `integration`, with a PR into `integration`. It fixes all 8 items in `docs/review/2026-11-26-speech.json`. The only ChatView item in the ios-node review (#6, model load outside the GPU gate) is a node/backend race, so it is left to `fix-node`.
+- **The voice was wrong.** `"af"` is not a Kokoro v1.0 voice. The Xybrid registry entry for kokoro-82m lists `default: af_heart` plus 54 ids, and Xybrid v0.21.0 matches ids exactly. The default is now `af_heart`, and each reply checks the voice against `model.voice(voiceId:)`, falling back to `defaultVoice()`. Settings has a voice picker built from `model.voices()`.
+- **State fixes:**
+  - Stop now ends the run as "Stopped.", because `LocalAgent` checks for cancellation after the stream loop. A truncated reply is no longer read aloud.
+  - Loads are single-flight, and each load clears its own loading phase. Turning the speaker toggle off cancels the download with `XybridDownload.cancel()`. A Kokoro download no longer disables the mic.
+  - `speak()` does nothing while recording or transcribing, and Send is disabled while the mic is live.
+- **Audio session:**
+  - An interruption stops playback and suspends the recording, keeping the audio.
+  - An engine configuration change re-taps the mic and keeps the samples.
+  - Unplugging headphones stops read-aloud.
+  - The session is deactivated with `.notifyOthersOnDeactivation` when idle.
+- **Recordings:** at the 2-minute cap, the recording stops, is transcribed and is sent. A failed ASR download keeps the recording, with Send recording / Discard buttons. Whisper is prefetched while the user talks.
+- **Memory:** `Xybrid.releaseMemory()` and dropped model references on a memory warning, and when an LLM of 3 GB or more is selected. `setAutoRelease(true)` is also set.
+- **Verification:** compiled in CI only; nothing has run on a device.
+
 ### 2026-11-26 (later): goal set, slots filled
 - **Goal:** the user set the standing goal, which is recorded in the Goal section.
 - **Agent slots (5):**
