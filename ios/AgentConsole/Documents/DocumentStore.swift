@@ -59,5 +59,53 @@ actor DocumentStore {
 
     private func save() throws {
         try JSONEncoder().encode(docs).write(to: indexURL, options: .atomic)
+        Task { @MainActor in NotificationCenter.default.post(name: .documentsChanged, object: nil) }
     }
+
+    // MARK: Agent-written text documents (see DocumentTools.swift)
+
+    /// Creates a UTF-8 text document. `name` must already be sanitized
+    /// (`DocumentNames.sanitize`); a numeric suffix keeps names unique.
+    func createTextDocument(name: String, text: String) throws -> ImportedDocument {
+        let unique = DocumentNames.unique(name, existing: Set(docs.map { $0.name.lowercased() }))
+        let id = String(UUID().uuidString.prefix(8)).lowercased()
+        let stored = "\(id)-\(unique)"
+        try Data(text.utf8).write(to: dir.appending(path: stored), options: .atomic)
+        let doc = ImportedDocument(id: id, name: unique, storedFilename: stored, importedAt: .now)
+        docs.append(doc)
+        try save()
+        return doc
+    }
+
+    /// Appends to a text document and returns its new length in characters.
+    func appendText(id: String, text: String, maxLength: Int) throws -> Int {
+        guard let doc = document(id: id), DocumentNames.isWritable(doc.name) else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let url = dir.appending(path: doc.storedFilename)
+        let current = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let joined = current.isEmpty || current.hasSuffix("\n") ? current + text : current + "\n" + text
+        guard joined.count <= maxLength else { throw CocoaError(.fileWriteOutOfSpace) }
+        try Data(joined.utf8).write(to: url, options: .atomic)
+        try save()
+        return joined.count
+    }
+
+    /// Looks a document up by id, or by name (case-insensitive, extension optional).
+    func resolve(_ idOrName: String) -> ImportedDocument? {
+        let key = idOrName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let d = docs.first(where: { $0.id == key }) { return d }
+        if let d = docs.last(where: { $0.name.lowercased() == key }) { return d }
+        return docs.last { ($0.name as NSString).deletingPathExtension.lowercased() == key }
+    }
+
+    func size(of doc: ImportedDocument) -> Int {
+        let url = dir.appending(path: doc.storedFilename)
+        return ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int) ?? 0
+    }
+}
+
+extension Notification.Name {
+    /// Posted after the document index changes (import, removal, agent writes).
+    static let documentsChanged = Notification.Name("AgentConsole.documentsChanged")
 }

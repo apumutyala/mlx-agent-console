@@ -13,6 +13,8 @@ final class LocalAgent {
         var text: String
         /// Hidden reasoning (`<think>`), shown collapsed under assistant turns.
         var thinking = ""
+        /// Tool output that came from another machine (untrusted for memory).
+        var remote = false
     }
 
     private(set) var turns: [Turn] = []
@@ -27,17 +29,64 @@ final class LocalAgent {
     private var task: Task<Void, Never>?
     static let maxToolSteps = 4
 
-    init(backend: any ModelBackend, documents: DocumentStore, tools: @escaping () -> ToolRegistry) {
+    /// Persistent memory (history, retrieval, reflection). Optional so the
+    /// agent still works without it (previews/tests).
+    let memory: MemoryHarness?
+    /// Identity of the current chat in the conversation store.
+    private(set) var conversationID = UUID()
+    /// Turns of a resumed chat, replayed into the first prompt of the new session.
+    private var resumedTurns: [StoredTurn] = []
+
+    init(backend: any ModelBackend, documents: DocumentStore, memory: MemoryHarness? = nil,
+         tools: @escaping () -> ToolRegistry) {
         self.backend = backend
         self.documents = documents
+        self.memory = memory
         self.toolsProvider = tools
     }
 
+    /// New chat. The finished one stays in history and is reflected on.
     func reset() {
         task?.cancel()
+        persist()
+        memory?.conversationEnded(conversationID)
         conversation = nil
         tools = nil
         turns = []
+        resumedTurns = []
+        conversationID = UUID()
+    }
+
+    /// Reopens a saved chat. The model gets a fresh session primed with the
+    /// tail of the saved transcript.
+    func resume(_ id: UUID) {
+        guard id != conversationID, let stored = memory?.storedTurns(id) else { return }
+        reset()
+        conversationID = id
+        resumedTurns = stored
+        turns = stored.map { t in
+            let role: Turn.Role = switch t.role {
+            case .user: .user
+            case .assistant: .assistant
+            case .tool: .tool
+            case .error: .error
+            }
+            return Turn(role: role, text: t.text, thinking: t.thinking, remote: t.remote)
+        }
+    }
+
+    private func persist() {
+        guard let memory else { return }
+        let stored = turns.map { t -> StoredTurn in
+            let role: StoredTurn.Role = switch t.role {
+            case .user: .user
+            case .assistant: .assistant
+            case .tool: .tool
+            case .error: .error
+            }
+            return StoredTurn(role: role, text: t.text, thinking: t.thinking, remote: t.remote)
+        }
+        memory.persist(conversationID: conversationID, turns: stored)
     }
 
     func stop() { task?.cancel() }
@@ -46,9 +95,12 @@ final class LocalAgent {
         guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         turns.append(Turn(role: .user, text: text))
         isRunning = true
+        let chat = conversationID
         task = Task { [weak self] in
             await self?.run(userMessage: text)
             self?.isRunning = false
+            // Skip if the user already switched chats (reset() saved this one).
+            if self?.conversationID == chat { self?.persist() }
         }
     }
 
@@ -57,10 +109,10 @@ final class LocalAgent {
         pendingConfirmation = nil
     }
 
-    private func instructions(tools: ToolRegistry) async -> String {
+    private func instructions(tools: ToolRegistry, firstMessage: String) async -> String {
         let files = await documents.all().map { "- \($0.id): \($0.name)" }.joined(separator: "\n")
         let device = UIDevice.current.model   // "iPad" / "iPhone"
-        return """
+        let base = """
         You are Agent Console's on-device model (\(backend.displayName)), running locally on the user's \(device) via MLX. \
         Nothing leaves the device unless a tool sends it, and worker jobs always need the user's approval.
         Be concise: answer in a few sentences or a short list, no preamble.
@@ -69,6 +121,10 @@ final class LocalAgent {
         Imported files (id: name):
         \(files.isEmpty ? "(none)" : files)
         """
+        guard let memory else { return base }
+        let context = await memory.systemContext(firstMessage: firstMessage, conversationID: conversationID,
+                                                 resumed: resumedTurns)
+        return base + "\n\n" + context
     }
 
     private enum Next {
@@ -77,7 +133,10 @@ final class LocalAgent {
     }
 
     private func run(userMessage: String) async {
+        var prefix = ""
         do {
+            // Reflection/embedding must not share the GPU with this turn.
+            await memory?.preemptBackgroundWork()
             if !(await backend.isLoaded) {
                 try await backend.load { _ in }
             }
@@ -85,11 +144,15 @@ final class LocalAgent {
                 let registry = toolsProvider()
                 tools = registry
                 conversation = try await backend.makeConversation(
-                    instructions: await instructions(tools: registry), tools: registry.specifications)
+                    instructions: await instructions(tools: registry, firstMessage: userMessage),
+                    tools: registry.specifications)
+            } else if let note = await memory?.turnContext(userMessage, conversationID: conversationID) {
+                // Later turns: memories newly relevant to this message ride along with it.
+                prefix = note
             }
             guard let conversation, let tools else { return }
 
-            var next = Next.user(userMessage)
+            var next = Next.user(prefix + userMessage)
             for _ in 0...Self.maxToolSteps {
                 try Task.checkCancellation()
                 turns.append(Turn(role: .assistant, text: ""))
@@ -149,7 +212,7 @@ final class LocalAgent {
                     // Errors go back to the model so it can correct itself.
                     result = "ERROR: \(error.localizedDescription)"
                 }
-                turns.append(Turn(role: .tool, text: result))
+                turns.append(Turn(role: .tool, text: result, remote: MemoryHarness.isRemoteTool(call.name)))
                 next = .toolResult(ToolResultMessage(callID: call.id, name: call.name, content: result))
             }
             turns.append(Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))

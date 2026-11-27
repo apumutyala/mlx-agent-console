@@ -43,7 +43,9 @@ struct ChatView: View {
             .navigationTitle("Local agent")
             .toolbar {
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
+                    .disabled(agent.isRunning)
             }
+            .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
                 guard !(await backend.isLoaded) else { return }
                 loadProgress = 0

@@ -47,6 +47,7 @@ struct SettingsView: View {
                     Text("\(entry.note) One-time download of about \(entry.sizeLabel); switching resets the chat."
                          + (hidden > 0 ? " Larger models need a 16 GB iPad." : ""))
                 }
+                MemorySettingsSection(memory: AppModel.shared.memory)
             }
             .navigationTitle("Settings")
         }
