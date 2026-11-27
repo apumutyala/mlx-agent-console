@@ -74,24 +74,28 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {
-        let (loaded, entry) = lock.withLock { (container, entry) }
-        guard let container = loaded else { throw BackendError.notLoaded }
+        let loadedContainer: ModelContainer? = lock.withLock { self.container }
+        let current: ModelCatalog.Entry = lock.withLock { self.entry }
+        guard let loadedContainer else { throw BackendError.notLoaded }
         var params = GenerateParameters()
-        params.maxTokens = entry.thinks ? 2048 : 1024   // leave room for <think> before the answer
-        params.temperature = entry.temperature
-        let specs: [ToolSpec]? = tools.isEmpty ? nil : tools.map { tool in
-            [
-                "type": "function",
-                "function": [
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                ] as [String: any Sendable],
-            ] as ToolSpec
+        params.maxTokens = current.thinks ? 2048 : 1024   // leave room for <think> before the answer
+        params.temperature = current.temperature
+        var specs: [ToolSpec]? = nil
+        if !tools.isEmpty {
+            specs = tools.map { (tool: ToolSpecification) -> ToolSpec in
+                var function: [String: any Sendable] = [:]
+                function["name"] = tool.name
+                function["description"] = tool.description
+                function["parameters"] = tool.parameters
+                var spec: ToolSpec = [:]
+                spec["type"] = "function"
+                spec["function"] = function
+                return spec
+            }
         }
         // No `toolDispatch`: calls come back as `.toolCall` items so the app can
         // validate, ask for confirmation and run them itself.
-        let session = ChatSession(container, instructions: instructions, generateParameters: params, tools: specs)
+        let session = ChatSession(loadedContainer, instructions: instructions, generateParameters: params, tools: specs)
         return MLXConversation(session: session)
     }
 
