@@ -13,6 +13,8 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     private var container: ModelContainer?
     /// Bumped on every switch so a load that finishes late can't install a stale model.
     private var epoch = 0
+    /// The load in flight for `epoch`, shared by concurrent `load` callers.
+    private var loading: (epoch: Int, task: Task<ModelContainer, Error>)?
     private let lock = NSLock()
 
     init(entry: ModelCatalog.Entry = ModelCatalog.selected) {
@@ -65,18 +67,36 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         if changed { MLX.Memory.clearCache() }
     }
 
+    /// Single-flight: concurrent callers (chat, node, summarizer) share one
+    /// in-flight load per selection epoch instead of loading the weights twice,
+    /// and a published container is never replaced by a second load.
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         reconcileSelection()
         if await isLoaded { progress(1); return }
-        let (target, startEpoch) = lock.withLock { (entry, epoch) }
-        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-        MLX.Memory.cacheLimit = 32 * 1024 * 1024
-        let loaded = try await #huggingFaceLoadModelContainer(
-            configuration: Self.configuration(for: target),
-            progress: .download { p in progress(p.fractionCompleted) }
-        )
-        lock.withLock {
-            if epoch == startEpoch { container = loaded }
+        let (task, startEpoch): (Task<ModelContainer, Error>, Int) = lock.withLock {
+            if let l = loading, l.epoch == epoch { return (l.task, l.epoch) }
+            let target = entry
+            let t = Task { () async throws -> ModelContainer in
+                // Keep MLX's buffer cache modest on iPad; weights dominate memory.
+                MLX.Memory.cacheLimit = 32 * 1024 * 1024
+                return try await #huggingFaceLoadModelContainer(
+                    configuration: Self.configuration(for: target),
+                    progress: .download { p in progress(p.fractionCompleted) }
+                )
+            }
+            loading = (epoch, t)
+            return (t, epoch)
+        }
+        do {
+            let loaded = try await task.value
+            lock.withLock {
+                if epoch == startEpoch, container == nil { container = loaded }
+                if loading?.epoch == startEpoch { loading = nil }
+            }
+            progress(1)
+        } catch {
+            lock.withLock { if loading?.epoch == startEpoch { loading = nil } }
+            throw error
         }
     }
 
@@ -114,18 +134,29 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
 final class MLXConversation: ModelConversation, @unchecked Sendable {
     let session: ChatSession
+    private let lock = NSLock()
+    /// The task relaying the current reply; awaited by `synchronize`.
+    private var relay: Task<Void, Never>?
     init(session: ChatSession) { self.session = session }
 
     func send(_ message: String) -> AsyncThrowingStream<ModelEvent, Error> {
-        Self.map(session.streamDetails(to: message))
+        map(session.streamDetails(to: message))
     }
 
     func sendToolResults(_ results: [ToolResultMessage]) -> AsyncThrowingStream<ModelEvent, Error> {
         let messages = results.map { Chat.Message.tool($0.content, id: $0.callID, name: $0.name) }
-        return Self.map(session.streamDetails(to: messages))
+        return map(session.streamDetails(to: messages))
     }
 
-    private static func map(_ upstream: AsyncThrowingStream<Generation, Error>) -> AsyncThrowingStream<ModelEvent, Error> {
+    /// Cancelling the consumer only *requests* a stop; the session's runner may
+    /// still be decoding. This waits for the relay and the session's runners.
+    func synchronize() async {
+        let task = lock.withLock { relay }
+        await task?.value
+        await session.synchronize()
+    }
+
+    private func map(_ upstream: AsyncThrowingStream<Generation, Error>) -> AsyncThrowingStream<ModelEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -150,6 +181,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+            lock.withLock { relay = task }
             continuation.onTermination = { _ in task.cancel() }
         }
     }

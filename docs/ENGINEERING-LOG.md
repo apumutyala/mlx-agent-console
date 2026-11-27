@@ -103,6 +103,14 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
+### 2026-11-26 (night): `fix-node`, review fixes for the iPad compute node
+- **Scope:** the 20 confirmed findings in `docs/review/2026-11-26-ios-node.json`, plus the device half of the HIGH privacy finding in `docs/review/2026-11-26-worker.json` (federated.py:171). The worker Python side is a separate agent's job; no `worker/*.py` edits here.
+- **Protocol (needs the worker fix):** a paused node now *releases* its task: it stops and never calls `/complete`. The worker requeues the task when the same node polls again or when the sweep runs. Finished results go to a persisted outbox (`node.pendingCompletions`). The outbox retries with backoff until the worker answers 2xx, 404 or 409, and it is flushed before every poll. Metrics are NaN/Inf-safe. Heartbeats carry a new key, `capabilities.train_on_documents`.
+- **Privacy:** two new settings, both off by default: "Accept training tasks" (without it, `train_lora` isn't advertised and train tasks fail) and "Allow federated training on my documents" (without it, `use_local_data` tasks fail and documents are never read).
+- **Chat weights:** a train task snapshots the chat's adapter and restores it afterwards, including on failure or cancel. Only "Use federated adapter" changes what the chat runs on.
+- **GPU gate:** `GPUGate.acquire` is now `async throws` and responds to cancellation. **Other branches that call `await GPUGate.shared.acquire(...)` must change it to `try await`.** `ModelConversation` gains `synchronize()`. The gate is released only after a cancelled generation has really stopped.
+- **Status:** CI build only (see the PR); nothing has run on a device.
+
 ### 2026-11-26 (later): goal set, slots filled
 - **Goal:** the user set the standing goal, which is recorded in the Goal section.
 - **Agent slots (5):**

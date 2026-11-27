@@ -9,6 +9,10 @@ struct NodeSettingsSection: View {
         Section {
             Toggle("Serve tasks", isOn: Binding(get: { node.isServing }, set: { node.setServing($0) }))
             Toggle("Keep screen awake while serving", isOn: Binding(get: { node.keepAwake }, set: { node.keepAwake = $0 }))
+            Toggle("Accept training tasks", isOn: Binding(get: { node.acceptTraining }, set: { node.acceptTraining = $0 }))
+            Toggle("Allow federated training on my documents",
+                   isOn: Binding(get: { node.allowDocumentTraining }, set: { node.allowDocumentTraining = $0 }))
+                .disabled(!node.acceptTraining)
             LabeledContent("Node ID") { Text(NodeService.nodeID).textSelection(.enabled).monospaced() }
             LabeledContent("Status", value: node.status)
             if let task = node.currentTask { LabeledContent("Current task", value: task) }
@@ -21,7 +25,7 @@ struct NodeSettingsSection: View {
                 .disabled(node.isApplyingAdapter)
             if let s = node.adapterStatus { Text(s).font(.footnote) }
         } header: { Text("Compute node") } footer: {
-            Text("Pulls generate and LoRA training tasks from the worker above. Only while the app is open: it pauses in the background and resumes when you return.")
+            Text("Serving pulls generate tasks from the worker above. LoRA training tasks run only if you accept them, and they train on your imported documents only if you allow that; otherwise only the examples the round sends are used. The adapter trained on this iPad is uploaded to the worker. Training never changes the chat model; \"Use federated adapter\" does. Only while the app is open: it pauses when you leave and resumes when you return.")
         }
     }
 }
