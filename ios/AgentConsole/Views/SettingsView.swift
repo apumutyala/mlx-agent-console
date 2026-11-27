@@ -27,6 +27,7 @@ struct SettingsView: View {
                     }
                 }
                 if let status { Text(status).font(.footnote) }
+                NodeSettingsSection(node: AppModel.shared.node)
                 Section("On-device") {
                     LabeledContent("Model", value: AppModel.shared.backend.displayName)
                     LabeledContent("Background GPU", value: BatchCoordinator.backgroundGPUAvailable ? "supported" : "not supported")

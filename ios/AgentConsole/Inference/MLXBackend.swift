@@ -19,6 +19,13 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
     var displayName: String { configuration.name }
 
+    /// Hugging Face repo id of the configured model (federated rounds match on it).
+    var modelID: String { configuration.name }
+
+    /// The loaded container, for MLX-level work (LoRA training, token counts)
+    /// that lives in MLX-only files. nil until `load` finishes.
+    var modelContainer: ModelContainer? { lock.withLock { container } }
+
     var isLoaded: Bool { get async { lock.withLock { container != nil } } }
 
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
@@ -49,7 +56,7 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     }
 }
 
-private final class MLXConversation: ModelConversation, @unchecked Sendable {
+final class MLXConversation: ModelConversation, @unchecked Sendable {
     let session: ChatSession
     init(session: ChatSession) { self.session = session }
 

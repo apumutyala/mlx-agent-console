@@ -37,6 +37,27 @@ final class LocalAgent {
 
     func stop() { task?.cancel() }
 
+    /// The model's weights changed (e.g. a LoRA adapter was trained or loaded),
+    /// so the conversation's KV cache no longer matches. The next message starts
+    /// a fresh conversation; the transcript stays on screen.
+    func invalidateConversation() {
+        conversation = nil
+    }
+
+    /// Model work holds the shared GPU gate so fleet tasks can't interleave.
+    /// Tool calls run outside it (the summarize tool takes the gate itself).
+    private func withGPU<T>(_ body: () async throws -> T) async throws -> T {
+        await GPUGate.shared.acquire("chat")
+        do {
+            let value = try await body()
+            await GPUGate.shared.release()
+            return value
+        } catch {
+            await GPUGate.shared.release()
+            throw error
+        }
+    }
+
     func send(_ text: String) {
         guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         turns.append(Turn(role: .user, text: text))
@@ -68,25 +89,31 @@ final class LocalAgent {
 
     private func run(userMessage: String) async {
         do {
-            if !(await backend.isLoaded) {
-                try await backend.load { _ in }
-            }
             let tools = toolsProvider()
-            if conversation == nil {
-                conversation = try await backend.makeConversation(instructions: await instructions(tools: tools))
+            let system = await instructions(tools: tools)
+            let conversation: any ModelConversation = try await withGPU {
+                if !(await backend.isLoaded) {
+                    try await backend.load { _ in }
+                }
+                if let existing = self.conversation { return existing }
+                let fresh = try await backend.makeConversation(instructions: system)
+                self.conversation = fresh
+                return fresh
             }
-            guard let conversation else { return }
 
             var message = userMessage
             for _ in 0...Self.maxToolSteps {
                 try Task.checkCancellation()
                 turns.append(Turn(role: .assistant, text: ""))
                 let idx = turns.count - 1
-                var reply = ""
-                for try await chunk in conversation.send(message) {
-                    try Task.checkCancellation()
-                    reply += chunk
-                    turns[idx].text = reply
+                let reply: String = try await withGPU {
+                    var reply = ""
+                    for try await chunk in conversation.send(message) {
+                        try Task.checkCancellation()
+                        reply += chunk
+                        self.turns[idx].text = reply
+                    }
+                    return reply
                 }
                 guard let call = ToolCallParser.firstCall(in: reply) else { return }
 

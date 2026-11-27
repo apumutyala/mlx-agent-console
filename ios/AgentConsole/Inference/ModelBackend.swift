@@ -12,6 +12,16 @@ protocol ModelBackend: AnyObject, Sendable {
 
     /// Start a fresh conversation. Each conversation owns its own KV cache.
     func makeConversation(instructions: String) async throws -> any ModelConversation
+
+    /// Same, with per-conversation sampling (fleet `generate` tasks set these).
+    func makeConversation(instructions: String, maxTokens: Int, temperature: Float) async throws -> any ModelConversation
+}
+
+extension ModelBackend {
+    // Backends without tunable sampling just ignore the knobs.
+    func makeConversation(instructions: String, maxTokens: Int, temperature: Float) async throws -> any ModelConversation {
+        try await makeConversation(instructions: instructions)
+    }
 }
 
 protocol ModelConversation: AnyObject, Sendable {
