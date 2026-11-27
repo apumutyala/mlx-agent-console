@@ -171,6 +171,18 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(nxt["task"]["id"], t["id"])
         self.assertEqual(self.fleet.tasks[t["id"]].meta["attempts"], 1)
 
+    def test_unstartable_task_is_not_redelivered_forever(self):
+        self.node("ipad-1")
+        _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})
+        for _ in range(12):   # node keeps polling but never starts it
+            self.fleet.next_task("ipad-1", 0)
+        self.assertEqual(self.fleet.tasks[t["id"]].meta["status"], "lost")
+
+    def test_train_lora_only_via_rounds(self):
+        self.node("ipad-1", kinds=("train_lora",))
+        st, _ = self.c.call("POST", "/tasks", {"kind": "train_lora", "payload": {"use_local_data": True}})
+        self.assertEqual(st, 400)
+
     def test_poll_while_owning_running_task_requeues_it(self):
         self.node("ipad-1"), self.node("ipad-2")
         _, t = self.c.call("POST", "/tasks", {"kind": "generate", "payload": {"prompt": "x"}})

@@ -230,7 +230,12 @@ class Fleet:
                     continue
                 if t.meta["status"] == "assigned":
                     self.nodes[node_id]["last_seen"] = now()
-                    return self.public(t)
+                    t.meta["deliveries"] = t.meta.get("deliveries", 1) + 1
+                    if t.meta["deliveries"] <= 3:
+                        return self.public(t)
+                    # Handed out repeatedly but never started: the node can't run it.
+                    self._requeue_or_lose(t, "node repeatedly failed to start the task")
+                    continue
                 if t.meta["status"] == "running":
                     self._requeue_or_lose(t, "node polled again without completing (abandoned)")
             while True:
@@ -244,6 +249,7 @@ class Fleet:
                 self.cond.wait(min(remaining, 5.0))
             # Claim atomically: nobody else can see this task as queued after this.
             task.meta["attempts"] = task.meta.get("attempts", 0) + 1
+            task.meta["deliveries"] = 1
             self.nodes[node_id]["current_task"] = task.id
             task.set_status("assigned", assigned_to=node_id)
             return self.public(task)
@@ -367,6 +373,10 @@ def handle(fleet: Fleet, method: str, parts: list[str], query: dict, body_reader
                 return 200, {"tasks": fleet.list_tasks()}
             if method == "POST":
                 b = body_reader()
+                if b.get("kind") == "train_lora":
+                    # Training only through /fed/rounds, which enforces the privacy
+                    # opt-ins and keeps per-device adapters private.
+                    raise ValueError("train_lora tasks are created by POST /fed/rounds")
                 return 201, fleet.public(fleet.create_task(str(b.get("kind", "")), b.get("payload") or {},
                                                            b.get("node") or None))
         if len(parts) >= 2 and parts[0] == "tasks":
