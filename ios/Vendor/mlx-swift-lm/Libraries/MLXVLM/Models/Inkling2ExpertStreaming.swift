@@ -160,6 +160,13 @@ struct Inkling2ExpertManifest: Decodable, Sendable {
         let groupSize: Int
         let inputDims: Int
         let outputDims: Int
+
+        enum CodingKeys: String, CodingKey {
+            case mode, bits
+            case groupSize = "group_size"
+            case inputDims = "input_dims"
+            case outputDims = "output_dims"
+        }
     }
 
     struct Field: Decodable, Sendable {
@@ -184,6 +191,14 @@ struct Inkling2ExpertManifest: Decodable, Sendable {
         let sha256: String
         let projections: [String: Projection]
         let fields: [Field]
+
+        enum CodingKeys: String, CodingKey {
+            case layer, experts, sha256, projections, fields
+            case tensorPrefix = "tensor_prefix"
+            case baseOffset = "base_offset"
+            case recordBytes = "record_bytes"
+            case recordStride = "record_stride"
+        }
     }
 
     static let formatName = "inkling2-expert-stream"
@@ -199,15 +214,21 @@ struct Inkling2ExpertManifest: Decodable, Sendable {
     let intermediateSize: Int
     let layers: [Layer]
 
+    enum CodingKeys: String, CodingKey {
+        case format, version, file, experts, layers
+        case fileBytes = "file_bytes"
+        case expertsPerToken = "experts_per_token"
+        case hiddenSize = "hidden_size"
+        case intermediateSize = "intermediate_size"
+    }
+
     static func exists(in directory: URL) -> Bool {
         FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName).path)
     }
 
     static func load(directory: URL) throws -> Inkling2ExpertManifest {
         let data = try Data(contentsOf: directory.appendingPathComponent(fileName))
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let manifest = try decoder.decode(Inkling2ExpertManifest.self, from: data)
+        let manifest = try JSONDecoder().decode(Inkling2ExpertManifest.self, from: data)
         try manifest.validate()
         return manifest
     }
@@ -364,6 +385,10 @@ final class Inkling2ExpertStreamRuntime: @unchecked Sendable {
         self.file = file
         self.trace = try options.traceURL.map { try Inkling2ExpertTraceWriter(url: $0) }
         counters.streaming = manifest != nil
+        // One header line per load; the lines after it until the next header belong to it.
+        trace?.appendLine(
+            "{\"load\":\"\(ISO8601DateFormatter().string(from: Date()))\","
+                + "\"streaming\":\(manifest != nil),\"resident_fraction\":\(options.residentFraction)}")
     }
 
     /// Slots per layer for `experts` experts and `topK` per token.
@@ -463,6 +488,10 @@ final class Inkling2ExpertTraceWriter: @unchecked Sendable {
         }
     }
 
+    func appendLine(_ line: String) {
+        lock.withLock { buffer.append(contentsOf: (line + "\n").utf8) }
+    }
+
     func flush() { lock.withLock { writeLocked() } }
 
     private func writeLocked() {
@@ -510,7 +539,7 @@ final class Inkling2ExpertSlotCache {
     private let runtime: Inkling2ExpertStreamRuntime
     private var destinations: [Destination]
     /// Bytes of the record before its first field and between fields: read into scratch memory.
-    private var gaps: [(offset: Int, length: Int)] = []
+    private let gaps: [(offset: Int, length: Int)]
     private var scratch: UnsafeMutableRawPointer?
     private var scratchBytes = 0
     private let readSpan: Int
@@ -529,12 +558,8 @@ final class Inkling2ExpertSlotCache {
         spec: Inkling2ExpertManifest.Layer, capacity: Int, arrays: [String: MLXArray],
         runtime: Inkling2ExpertStreamRuntime
     ) throws {
-        self.layer = spec.layer
-        self.experts = spec.experts
-        self.capacity = capacity
-        self.identity = capacity == spec.experts
-        self.spec = spec
-        self.runtime = runtime
+        let experts = spec.experts
+        let identity = capacity == experts
         guard experts <= Int(Int16.max), capacity > 0, capacity <= experts else {
             throw Inkling2ExpertStreamingError.manifest("layer \(spec.layer): \(capacity) slots")
         }
@@ -557,7 +582,7 @@ final class Inkling2ExpertSlotCache {
                     name: field.name, array: array, bytesPerSlot: field.nbytes,
                     offsetInRecord: field.offset))
         }
-        self.destinations = destinations
+        var gaps = [(offset: Int, length: Int)]()
         var cursor = 0
         for d in destinations {
             if d.offsetInRecord > cursor {
@@ -565,14 +590,22 @@ final class Inkling2ExpertSlotCache {
             }
             cursor = d.offsetInRecord + d.bytesPerSlot
         }
-        readSpan = cursor
 
-        slotOf = Array(repeating: -1, count: experts)
-        expertOf = Array(repeating: -1, count: capacity)
-        score = Array(repeating: 0, count: capacity)
-        lastUse = Array(repeating: 0, count: capacity)
-        stamp = Array(repeating: -1, count: capacity)
-        free = identity ? [] : (0 ..< capacity).reversed().map { Int16($0) }
+        self.layer = spec.layer
+        self.experts = experts
+        self.capacity = capacity
+        self.identity = identity
+        self.spec = spec
+        self.runtime = runtime
+        self.destinations = destinations
+        self.gaps = gaps
+        self.readSpan = cursor
+        self.slotOf = Array(repeating: -1, count: experts)
+        self.expertOf = Array(repeating: -1, count: capacity)
+        self.score = Array(repeating: 0, count: capacity)
+        self.lastUse = Array(repeating: 0, count: capacity)
+        self.stamp = Array(repeating: -1, count: capacity)
+        self.free = identity ? [] : (0 ..< capacity).reversed().map { Int16($0) }
     }
 
     deinit { scratch?.deallocate() }
@@ -632,7 +665,7 @@ final class Inkling2ExpertSlotCache {
         }
         pattern.withUnsafeBytes { base.copyMemory(from: $0.baseAddress!, byteCount: item) }
         let readBack = (array.reshaped(-1)[0 ..< 1] * 1).asData(access: .copy).data
-        memset(base, 0, item)
+        _ = memset(base, 0, item)
         guard Array(readBack) == pattern else {
             throw Inkling2ExpertStreamingError.binding(
                 "a write into \(name) of layer \(layer) is not visible to MLX; "
@@ -747,7 +780,7 @@ final class Inkling2ExpertSlotCache {
             pieces.sort { $0.offset < $1.offset }
             reads.append(
                 Inkling2ExpertRead(
-                    vectors: pieces.map(\.iov), offset: spec.baseOffset + expert * spec.recordStride,
+                    vectors: pieces.map { $0.iov }, offset: spec.baseOffset + expert * spec.recordStride,
                     total: readSpan))
         }
         let batch = Inkling2ExpertReadBatch(file: file, reads: reads, workers: workers)

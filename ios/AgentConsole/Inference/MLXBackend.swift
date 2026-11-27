@@ -26,6 +26,7 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         MemoryBudget.mlxSnapshot = {
             (MLX.Memory.activeMemory, MLX.Memory.peakMemory, MLX.Memory.cacheMemory)
         }
+        BenchMetricsRegistry.register(InklingStreamingMetrics.shared)
     }
 
     var displayName: String { lock.withLock { entry.displayName } }
@@ -126,6 +127,17 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         async throws -> ModelContainer
     {
         let defaults = UserDefaults.standard
+        // A streamed build comes from our own server (made offline by tools/expert_repack.py),
+        // not from Hugging Face; download it first (resumable), then load from its directory.
+        var streamedDirectory: URL? = nil
+        if let build = target.streamed {
+            streamedDirectory = try await StreamedModelStore.ensureDownloaded(build) { p in progress(0.9 * p) }
+        }
+        // Read by the Inkling loader once per load: off for every non-streamed load.
+        Inkling2ExpertStreaming.options = Inkling2ExpertStreamingOptions(
+            enabled: target.streamed != nil,
+            residentFraction: target.streamed?.residentFraction ?? 1,
+            traceURL: StreamingDiagnostics.traceEnabled ? StreamingDiagnostics.traceURL : nil)
         let availableBefore = MemoryBudget.availableBytes
         if availableBefore > 0 {
             // A soft cap: past it MLX waits for in-flight work before allocating more, which
@@ -142,20 +154,32 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         let handlers = LoadProgressHandlers(
             download: { p in progress(0.9 * p.fractionCompleted) },
             weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) })
-        let loaded = try await VLMModelFactory.shared.loadContainer(
-            from: #hubDownloader(),
-            using: #huggingFaceTokenizerLoader(),
-            configuration: Self.configuration(for: target),
-            progress: handlers)
+        let loaded: ModelContainer
+        if let streamedDirectory {
+            loaded = try await VLMModelFactory.shared.loadContainer(
+                from: streamedDirectory,
+                using: #huggingFaceTokenizerLoader(),
+                progress: LoadProgressHandlers(weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) }))
+        } else {
+            loaded = try await VLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: Self.configuration(for: target),
+                progress: handlers)
+        }
 
         defaults.removeObject(forKey: MemoryBudget.pendingLoadKey)
         let snapshot = MemoryBudget.mlxSnapshot()
-        let report = String(
+        var report = String(
             format: "%@: loaded in %.0f s · MLX active %@, peak %@ · app available before %@, after %@ · MLX limit %@",
             target.displayName, Date().timeIntervalSince(started),
             MemoryBudget.gb(snapshot.active), MemoryBudget.gb(snapshot.peak),
             MemoryBudget.gb(availableBefore), MemoryBudget.gb(MemoryBudget.availableBytes),
             MemoryBudget.gb(MLX.Memory.memoryLimit))
+        if target.streamed != nil, let s = Inkling2ExpertStreaming.snapshot(), s.streaming {
+            report += String(format: " · streaming %d/%d experts per layer (%@ of slots)",
+                             s.slotsPerLayer, s.expertsPerLayer, MemoryBudget.gb(s.slotBytes))
+        }
         defaults.set(report, forKey: MemoryBudget.lastLoadReportKey)
         return loaded
     }
@@ -166,7 +190,9 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         guard let loadedContainer else { throw BackendError.notLoaded }
         var params = GenerateParameters()
         params.maxTokens = current.thinks ? 2048 : 1024   // leave room for <think> before the answer
-        params.temperature = current.temperature
+        // Settings → Inkling expert streaming → "Greedy decoding": temperature 0 for the
+        // offload-on vs offload-off correctness gate.
+        params.temperature = StreamingDiagnostics.greedy ? 0 : current.temperature
         if let context = current.contextTokens { params.maxKVSize = context }
         if let step = current.prefillStepSize { params.prefill.stepSize = step }
         var context: [String: any Sendable]? = nil
@@ -231,6 +257,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
                         default: break   // .info, .steering
                         }
                     }
+                    Inkling2ExpertStreaming.flushTrace()   // no-op unless the routing trace is on
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -239,4 +266,36 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+}
+
+/// Inkling expert-streaming counters for benchmark receipts (`BenchMetricsSource`) and the
+/// Settings readout. Cumulative since the load or the last reset; empty without an Inkling load
+/// that streams or traces.
+final class InklingStreamingMetrics: BenchMetricsSource, @unchecked Sendable {
+    static let shared = InklingStreamingMetrics()
+
+    var benchMetricsName: String { "inkling_stream" }
+
+    func benchMetrics() -> [String: Double] {
+        guard let s = Inkling2ExpertStreaming.snapshot() else { return [:] }
+        return [
+            "streaming": s.streaming ? 1 : 0,
+            "slots_per_layer": Double(s.slotsPerLayer),
+            "experts_per_layer": Double(s.expertsPerLayer),
+            "slot_bytes": Double(s.slotBytes),
+            "forwards": Double(s.forwards),
+            "moe_calls": Double(s.calls),
+            "chunked_calls": Double(s.chunkedCalls),
+            "expert_lookups": Double(s.expertLookups),
+            "misses": Double(s.misses),
+            "hit_rate": s.hitRate,
+            "bytes_read": Double(s.bytesRead),
+            "read_s": s.readSeconds,
+            "read_gb_per_s": s.readGBPerSecond,
+            "route_wait_s": s.routeWaitSeconds,
+            "gpu_sync_s": s.gpuSyncSeconds,
+        ]
+    }
+
+    func resetBenchMetrics() { Inkling2ExpertStreaming.resetStatistics() }
 }

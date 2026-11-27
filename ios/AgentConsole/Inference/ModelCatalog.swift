@@ -36,6 +36,9 @@ enum ModelCatalog {
         var prefillStepSize: Int? = nil
         /// Chat-template `reasoning_effort` (Inkling: none/minimal/low/medium/high/xhigh/max).
         var reasoningEffort: String? = nil
+        /// Set for an SSD-streamed build: the routed experts stay in `experts.bin` and only a
+        /// fraction of them is resident. Downloaded from `StreamedModelStore`, not Hugging Face.
+        var streamed: StreamedBuild? = nil
 
         var sizeLabel: String {
             downloadGB < 1 ? "\(Int((downloadGB * 1000).rounded())) MB" : String(format: "%.1f GB", downloadGB)
@@ -75,9 +78,9 @@ enum ModelCatalog {
 
     /// Shared settings for every Inkling 2 Mini build.
     static func inkling(id: String, name: String, repo: String, downloadGB: Double, residentGB: Double,
-                        note: String) -> Entry {
+                        note: String, minimumMemoryGB: Double = 14) -> Entry {
         Entry(id: id, displayName: name, repo: repo, downloadGB: downloadGB, note: note,
-              minimumMemoryGB: 14, thinks: true, temperature: 0.6, loader: .vlm,
+              minimumMemoryGB: minimumMemoryGB, thinks: true, temperature: 0.6, loader: .vlm,
               residentGB: residentGB, contextTokens: 8192, prefillStepSize: 512, reasoningEffort: "low")
     }
 
@@ -99,7 +102,59 @@ enum ModelCatalog {
         repo: "roman220220/Inkling-2-Mini-gptq-mlx-jang", downloadGB: 13.5, residentGB: 12.49,
         note: "Highest-quality Inkling build that might fit; needs a very high per-app memory limit.")
 
-    static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3]
+    // MARK: Inkling 2 Mini, SSD expert streaming
+    //
+    // The same DWQ weights, repacked offline by `tools/expert_repack.py` into core shards plus
+    // `experts.bin` (layer-major 16 KiB-aligned expert records) and `experts.json`. The repack is
+    // byte-exact, so quality equals the resident DWQ tier; only speed and memory change. Each layer
+    // keeps `residentFraction` of its 128 experts in memory and reads misses from flash.
+    // Sizes from the DWQ safetensors headers: text core 1.357 GB, routed experts 8.239 GB,
+    // experts.bin 8.259 GB (record padding), vision 0.637 GB (loads on the first image).
+
+    /// An SSD-streamed build: where it is hosted and how much of it stays resident.
+    struct StreamedBuild: Hashable, Sendable {
+        /// The directory name under the streamed-models URL (the repack output directory).
+        let name: String
+        /// Fraction of each layer's experts kept in memory (`S = round(f * 128)` slots).
+        let residentFraction: Double
+    }
+
+    static let dwqStreamName = "Inkling-2-Mini-MLX-3.1bpw-DWQ-stream"
+    static let dwqTextCoreGB = 1.357
+    static let dwqExpertsGB = 8.239
+
+    static func inklingStreamed(id: String, name: String, fraction: Double, minimumMemoryGB: Double,
+                                note: String) -> Entry {
+        var entry = inkling(
+            id: id, name: name, repo: "LocallyInferred/Inkling-2-Mini-MLX-3.1bpw-DWQ",
+            downloadGB: 10.3, residentGB: dwqTextCoreGB + fraction * dwqExpertsGB, note: note,
+            minimumMemoryGB: minimumMemoryGB)
+        entry.streamed = StreamedBuild(name: dwqStreamName, residentFraction: fraction)
+        return entry
+    }
+
+    /// 32 of 128 experts per layer resident: ~3.4 GB weights. Fits without the
+    /// increased-memory-limit entitlement; slowest (most misses).
+    static let inkling2MiniStream25 = inklingStreamed(
+        id: "inkling2-mini-dwq3.1-stream25", name: "Inkling 2 Mini · streamed 25%", fraction: 0.25,
+        minimumMemoryGB: 7,
+        note: "The 3.1-bit DWQ build with 25% of experts in memory, the rest read from storage. "
+            + "Smallest footprint; experimental.")
+    /// 64 of 128 resident: ~5.5 GB weights.
+    static let inkling2MiniStream50 = inklingStreamed(
+        id: "inkling2-mini-dwq3.1-stream50", name: "Inkling 2 Mini · streamed 50%", fraction: 0.5,
+        minimumMemoryGB: 7,
+        note: "The 3.1-bit DWQ build with half of its experts in memory. Experimental.")
+    /// Every expert resident, through the streaming path: the exactness gate against the
+    /// resident DWQ tier (must greedy-match it). Same memory as the resident build.
+    static let inkling2MiniStream100 = inklingStreamed(
+        id: "inkling2-mini-dwq3.1-stream100", name: "Inkling 2 Mini · streamed 100% (check)",
+        fraction: 1.0, minimumMemoryGB: 14,
+        note: "Diagnostic: the streamed build with every expert resident. Output must match the "
+            + "resident DWQ build exactly.")
+
+    static let inklingTiers: [Entry] = [inkling2MiniDWQ, inkling2MiniGPTQSmall, inkling2MiniGPTQ3,
+                                        inkling2MiniStream25, inkling2MiniStream50, inkling2MiniStream100]
 
     static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b] + inklingTiers
     static let defaultEntry = lfm3_1_7b

@@ -27,7 +27,7 @@ jobs:
         working-directory: tools
         run: |
           pip install numpy
-          python -m unittest -v test_expert_repack
+          python -m unittest -v test_expert_repack test_expert_trace_sim
 
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.

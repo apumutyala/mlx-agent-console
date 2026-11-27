@@ -21,7 +21,20 @@ Copied: `Libraries/`, `Package.swift`, `LICENSE`, `ACKNOWLEDGMENTS.md`. Not copi
    DSpark draft that a conversion's index places beside the weights (roman220220's
    `model-mtp.safetensors`) is neither read nor rejected by strict validation.
 
-Both code patches are marked `[agent-console patch A/B]` in the source.
+4. SSD expert streaming for Inkling 2, off by default (`[agent-console patch C]`):
+   - `Libraries/MLXVLM/Models/Inkling2ExpertStreaming.swift` (new): the `experts.json` manifest,
+     an `F_NOCACHE` `preadv` reader, the per-layer `Inkling2ExpertSlotCache`, counters and the
+     optional routing trace. Public surface: `Inkling2ExpertStreaming.options/snapshot()/...`.
+   - `Libraries/MLXVLM/Models/Inkling2.swift`: slot-sized expert tensors built from the manifest
+     in `prepareCheckpoint`; `Inkling2Experts.outputs/decode` route through the slots (chunked when
+     a call needs more experts than slots); prefill chunks and the token iterator's next-step
+     async evaluation are drained while streaming.
+   - `Libraries/MLXLMCommon/Load.swift`: `CheckpointLoadingHooks` (the model sees its directory
+     before loading and can filter tensor names), so a streamed load never reads stacked experts.
+   Nothing changes unless `Inkling2ExpertStreaming.options.enabled` is set and the model directory
+   has `experts.json` (or a trace URL is set, which only records routing).
+
+The code patches are marked `[agent-console patch A/B/C]` in the source.
 
 ## Updating
 
