@@ -11,11 +11,19 @@ final class AppModel {
     lazy var summarizer = DocumentSummarizer(backend: backend, documents: documents)
     lazy var batchCoordinator = BatchCoordinator(
         runner: BatchRunner(store: batches, summarizer: summarizer, documents: documents))
-    lazy var agent = LocalAgent(backend: backend, documents: documents) { [unowned self] in
-        ToolRegistry(
-            summarize: SummarizeImportedFileTool(documents: documents, summarizer: summarizer),
-            submitJob: (try? WorkerClient.fromSettings()).map { SubmitWorkerJobTool(client: $0) })
-    }
+    lazy var memory = MemoryHarness(backend: backend, documents: documents)
+    lazy var agent: LocalAgent = {
+        let agent = LocalAgent(backend: backend, documents: documents, memory: memory) { [unowned self] in
+            var registry = ToolRegistry(
+                summarize: SummarizeImportedFileTool(documents: documents, summarizer: summarizer),
+                submitJob: (try? WorkerClient.fromSettings()).map { SubmitWorkerJobTool(client: $0) })
+            registry.registerDocumentTools(documents)
+            registry.registerMemoryTools(memory, conversationID: self.agent.conversationID)
+            return registry
+        }
+        memory.agent = agent
+        return agent
+    }()
     lazy var node = NodeService(
         backend: backend, documents: documents,
         trainer: (backend as? MLXBackend).map { FederatedTrainer(backend: $0) },
@@ -46,6 +54,7 @@ struct AgentConsoleApp: App {
             if phase == .background, !BatchCoordinator.backgroundGPUAvailable {
                 AppModel.shared.batchCoordinator.pauseForeground()
             }
+            AppModel.shared.memory.scenePhaseChanged(phase)
             AppModel.shared.node.scenePhaseChanged(phase)
         }
     }

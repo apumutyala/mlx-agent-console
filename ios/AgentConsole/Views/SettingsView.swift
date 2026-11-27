@@ -46,6 +46,7 @@ struct SettingsView: View {
                          + (hidden > 0 ? " Larger models need a 16 GB iPad." : ""))
                 }
                 SpeechSettingsSection()
+                MemorySettingsSection(memory: AppModel.shared.memory)
             }
             .navigationTitle("Settings")
             .sheet(isPresented: $scanning) {

@@ -37,7 +37,7 @@ struct ChatView: View {
                             agent.send(draft); draft = ""
                         }
                         // Not while the mic is live or a transcript is pending (it would be dropped).
-                        .disabled(draft.isEmpty || SpeechService.shared.isRecording || SpeechService.shared.isBusy)
+                        .disabled(draft.isEmpty || SpeechService.shared.isRecording)  // a transcript that finishes while a typed turn runs is held (hostIsBusy), not dropped
                     }
                 }
                 .labelStyle(.iconOnly)
@@ -49,7 +49,9 @@ struct ChatView: View {
             .toolbar {
                 SpeakerToggle()
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
+                    .disabled(agent.isRunning)
             }
+            .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
                 guard !(await backend.isLoaded) else { return }
                 loadProgress = 0
