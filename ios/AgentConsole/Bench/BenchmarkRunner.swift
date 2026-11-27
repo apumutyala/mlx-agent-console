@@ -245,6 +245,7 @@ struct BenchmarkRunner: Sendable {
             let input = LMInput(tokens: MLXArray(prompt.map { Int32($0) }))
             let params = MLXBackend.benchmarkParameters(for: entry, maxTokens: maxTokens, seed: BenchmarkRunner.seed)
             if isCancelled() || Task.isCancelled { throw CancellationError() }
+            _ = ExpertStreaming.takeError()   // drop a stale streamed-read failure
             let start = clock()
             var iterator = try TokenIterator(input: input, model: ctx.model, parameters: params)
             let ready = clock()
@@ -258,6 +259,8 @@ struct BenchmarkRunner: Sendable {
             let end = clock()
             // next() queued one more step; let it drain outside the timed region.
             MLX.Stream.defaultStream.synchronize()
+            // A streamed tier's failed expert read is not fatal; it fails this run instead.
+            if let failure = ExpertStreaming.takeError() { throw failure }
 
             var stops = ctx.configuration.eosTokenIds
             if let eos = ctx.tokenizer.eosTokenId { stops.insert(eos) }
