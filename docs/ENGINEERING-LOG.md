@@ -142,6 +142,29 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
+### 2026-11-27: receipts round 2 (build `b74c0e2`, workload set w2, no background apps)
+Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, plugged in, thermal nominal throughout.
+
+| Model | Decode tok/s: short / 1K / 4K (round 1) | TTFT 1K / 4K (s) | Peak GB | Decode MBU (short) |
+|---|---|---|---|---|
+| LFM2.5 350M | **434** / 358 / 201 (424 / 349 / 197) | 0.09 / 0.38 | 1.50 | 63% |
+| LFM2.5 1.2B | **172** / 164 / 143 (169 / 160 / 139) | 0.20 / 0.80 | 1.46 | 74% |
+| LFM3 1.7B (default) | **116** / 112 / 104 (113 / 109 / 101) | 0.30 / 1.19 | 1.75 | 73% |
+| Qwen3 1.7B | **112** / 92 / 56 (109 / 89 / 48) | 0.28 / 1.24 | 2.10 | 71% |
+
+**Findings**
+- **Reproducibility:** rep spread is now 0.1–0.9%, and identical output hashes reproduce round 1 for every model and workload. The w2 per-workload warm-up removed the rep-1 compile outlier.
+- **Speed vs round 1:** about 2–3% faster across the board. Qwen at 4K is 17% faster (48 → 56) with no variance. Round 1 had background apps running, so treat round 2 as the baseline.
+- **Memory limit, re-measured:** 5.28–5.31 GB available.
+  - All three resident Inkling tiers were correctly refused, with the explicit message: 11.2, 12.1 and 14.1 GB needed.
+  - LFM2.5-8B-A1B was skipped (needs 6.5 GB).
+- **Abort path verified on device:** one LFM3 run left the foreground and produced `status: aborted` cleanly, with no crash. The rerun was fine.
+- **Open bug:** `weight_files_bytes` is still 76. The fix is in `engine-ab`.
+- **Roofline:** the dense 1–2B models sit at 71–74% of the 153.6 GB/s bandwidth roof. Remaining kernel headroom is at most about 1.35×. Bigger quality gains need bigger models within 5.3 GB, so the next levers are:
+  - lamq 3.9 GB Inkling, fully resident (PR #11);
+  - LFM2.5-8B-A1B streamed or GGUF mmap (PR #10, engine-ab A2–A7);
+  - Inkling streaming (PR #9).
+
 ### 2026-11-27 (morning): receipts round 1, polling incident, engine research
 - **Receipts round 1:** see Findings. The app's memory limit is about 5.3 GB, so resident Inkling and the 8B MoE (4-bit) don't fit.
 - **Polling incident (negative result):**

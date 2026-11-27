@@ -1,0 +1,55 @@
+{
+  "app_git_sha" : "b74c0e228f723cd5a92f953f9f1bfd78a627ba4a",
+  "app_version" : "1.0 (1)",
+  "created_at" : "2026-11-27T08:09:18Z",
+  "device" : {
+    "machine" : "iPad17,3",
+    "model" : "iPad",
+    "os" : "iPadOS 27.2.1",
+    "physical_memory_bytes" : 16136650752,
+    "processor_count" : 10
+  },
+  "environment" : {
+    "available_memory_after_bytes" : 5296552616,
+    "available_memory_before_bytes" : 5277743784,
+    "battery_level_after" : 1,
+    "battery_level_before" : 1,
+    "battery_state_after" : "full",
+    "battery_state_before" : "full",
+    "low_power_mode" : false,
+    "thermal_after" : "nominal",
+    "thermal_before" : "nominal",
+    "thermal_max_during" : "nominal"
+  },
+  "library" : {
+    "mlx_swift" : "0.33.x",
+    "mlx_swift_lm" : "3.33.0"
+  },
+  "model" : {
+    "catalog_download_gb" : 11.5,
+    "display_name" : "Inkling 2 Mini · GPTQ 2\/3-bit",
+    "id" : "inkling2-mini-gptq-small",
+    "repo" : "roman220220\/Inkling-2-Mini-gptq-mlx-jang-small"
+  },
+  "params" : {
+    "memory_sample_interval_ms" : 50,
+    "mlx_cache_limit_bytes" : 33554432,
+    "prompt_mode" : "raw token ids, no chat template; filled prompts cut to exact length",
+    "repetitions" : 3,
+    "seed" : 1234,
+    "settle_s" : 10,
+    "stop_tokens" : "ignored: every rep decodes max_tokens (first stop index recorded)",
+    "temperature" : 0,
+    "timing" : "wall clock around mlx-swift-lm TokenIterator; ttft = init + first next(); decode_tps = (n-1)\/(t_last - t_first); one untimed warm-up per workload",
+    "warmup_tokens" : 8
+  },
+  "receipt_id" : "df63166f-57e6-4d7e-b0bb-94c7965dd53d",
+  "schema" : 1,
+  "skip_reason" : "Inkling 2 Mini · GPTQ 2\/3-bit needs about 12.06 GB (weights + 1.5 GB headroom); iOS allows this app about 5.30 GB and 5.30 GB is free now. That is iOS's default limit: free Apple ID sideloads don't get the increased-memory-limit entitlement. Use the streamed tier or a smaller model. (Settings › Memory has the readout; “Ignore memory check” overrides.)",
+  "status" : "skipped",
+  "total_wall_s" : 10.22799801826477,
+  "workload_set" : "w2",
+  "workloads" : [
+
+  ]
+}
