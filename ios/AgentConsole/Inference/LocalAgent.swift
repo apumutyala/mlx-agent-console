@@ -27,7 +27,17 @@ final class LocalAgent {
     private var conversation: (any ModelConversation)?
     private var tools: ToolRegistry?
     private var task: Task<Void, Never>?
+    /// Bumped whenever the model's weights change; a turn started on an older
+    /// generation must not keep decoding on its stale KV cache.
+    private(set) var modelGeneration = 0
     static let maxToolSteps = 4
+
+    enum AgentError: LocalizedError {
+        case modelChanged
+        var errorDescription: String? {
+            "The model's weights changed during this reply (a compute-node task updated the adapter). Send your message again."
+        }
+    }
 
     /// Persistent memory (history, retrieval, reflection). Optional so the
     /// agent still works without it (previews/tests).
@@ -98,17 +108,25 @@ final class LocalAgent {
     /// a fresh conversation; the transcript stays on screen.
     func invalidateConversation() {
         conversation = nil
+        modelGeneration += 1
     }
 
     /// Model work holds the shared GPU gate so fleet tasks can't interleave.
     /// Tool calls run outside it (the summarize tool takes the gate itself).
-    private func withGPU<T>(_ body: () async throws -> T) async throws -> T {
-        await GPUGate.shared.acquire("chat")
+    /// `draining` is the conversation the body streams from: on every exit
+    /// (including Stop and errors) we wait for its generation to really stop
+    /// before handing the model to the next holder.
+    private func withGPU<T>(draining conversation: (any ModelConversation)? = nil,
+                            _ body: () async throws -> T) async throws -> T {
+        try await GPUGate.shared.acquire("chat")
         do {
+            try Task.checkCancellation()
             let value = try await body()
+            await conversation?.synchronize()
             await GPUGate.shared.release()
             return value
         } catch {
+            await conversation?.synchronize()
             await GPUGate.shared.release()
             throw error
         }
@@ -174,14 +192,14 @@ final class LocalAgent {
             await memory?.preemptBackgroundWork()
             // Model load and conversation setup touch the GPU: take the shared gate so a
             // fleet task or batch summary can't run at the same time.
-            let (conversation, tools, prefix): (any ModelConversation, ToolRegistry, String) = try await withGPU {
+            let (conversation, tools, prefix, generation): (any ModelConversation, ToolRegistry, String, Int) = try await withGPU {
                 if !(await backend.isLoaded) {
                     try await backend.load { _ in }
                 }
                 if let existing = self.conversation, let registry = self.tools {
                     // Later turns: memories newly relevant to this message ride along with it.
                     let note = await memory?.turnContext(userMessage, conversationID: conversationID)
-                    return (existing, registry, note ?? "")
+                    return (existing, registry, note ?? "", self.modelGeneration)
                 }
                 let registry = toolsProvider()
                 let fresh = try await backend.makeConversation(
@@ -189,7 +207,7 @@ final class LocalAgent {
                     tools: registry.specifications)
                 self.tools = registry
                 self.conversation = fresh
-                return (fresh, registry, "")
+                return (fresh, registry, "", self.modelGeneration)
             }
 
             var next = Next.user(prefix + userMessage)
@@ -202,14 +220,18 @@ final class LocalAgent {
                 var reasoning = ""
                 var nativeCall: ToolCallProposal?
                 var rejection: String?
+                let request = next
+                // Hold the GPU gate only while tokens stream (tool calls run outside it,
+                // so a tool that itself needs the model can't deadlock). The stream is
+                // created inside the gate, since creating it starts generation.
+                try await withGPU(draining: conversation) {
+                // A fleet task may have trained or swapped the adapter while a tool ran.
+                guard self.modelGeneration == generation else { throw AgentError.modelChanged }
                 let stream: AsyncThrowingStream<ModelEvent, Error>
-                switch next {
+                switch request {
                 case .user(let text): stream = conversation.send(text)
                 case .toolResult(let result): stream = conversation.sendToolResults([result])
                 }
-                // Hold the GPU gate only while tokens stream (tool calls run outside it,
-                // so a tool that itself needs the model can't deadlock).
-                try await withGPU {
                 for try await event in stream {
                     try Task.checkCancellation()
                     try ensureCurrent(chat)

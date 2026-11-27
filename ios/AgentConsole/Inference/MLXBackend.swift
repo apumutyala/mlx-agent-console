@@ -65,6 +65,11 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         if changed { MLX.Memory.clearCache() }
     }
 
+    /// Loads inline, in the caller's task, so cancelling the caller (pause,
+    /// Serve off, chat Stop) cancels the download. Every caller holds `GPUGate`,
+    /// which serializes loads; a weight read that can't be interrupted simply
+    /// finishes while its caller still holds the gate, so no second load can
+    /// overlap it. A container that is already published is never replaced.
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         reconcileSelection()
         if await isLoaded { progress(1); return }
@@ -75,9 +80,11 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
             configuration: Self.configuration(for: target),
             progress: .download { p in progress(p.fractionCompleted) }
         )
+        try Task.checkCancellation()
         lock.withLock {
-            if epoch == startEpoch { container = loaded }
+            if epoch == startEpoch, container == nil { container = loaded }
         }
+        progress(1)
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {
@@ -114,18 +121,29 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
 final class MLXConversation: ModelConversation, @unchecked Sendable {
     let session: ChatSession
+    private let lock = NSLock()
+    /// The task relaying the current reply; awaited by `synchronize`.
+    private var relay: Task<Void, Never>?
     init(session: ChatSession) { self.session = session }
 
     func send(_ message: String) -> AsyncThrowingStream<ModelEvent, Error> {
-        Self.map(session.streamDetails(to: message))
+        map(session.streamDetails(to: message))
     }
 
     func sendToolResults(_ results: [ToolResultMessage]) -> AsyncThrowingStream<ModelEvent, Error> {
         let messages = results.map { Chat.Message.tool($0.content, id: $0.callID, name: $0.name) }
-        return Self.map(session.streamDetails(to: messages))
+        return map(session.streamDetails(to: messages))
     }
 
-    private static func map(_ upstream: AsyncThrowingStream<Generation, Error>) -> AsyncThrowingStream<ModelEvent, Error> {
+    /// Cancelling the consumer only *requests* a stop; the session's runner may
+    /// still be decoding. This waits for the relay and the session's runners.
+    func synchronize() async {
+        let task = lock.withLock { relay }
+        await task?.value
+        await session.synchronize()
+    }
+
+    private func map(_ upstream: AsyncThrowingStream<Generation, Error>) -> AsyncThrowingStream<ModelEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -150,6 +168,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+            lock.withLock { relay = task }
             continuation.onTermination = { _ in task.cancel() }
         }
     }

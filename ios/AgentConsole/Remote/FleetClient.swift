@@ -8,7 +8,12 @@ struct NodeInfo: Encodable, Sendable {
         let model: String
         let memoryGB: Double
         let os: String
-        enum CodingKeys: String, CodingKey { case kinds, model, memoryGB = "memory_gb", os }
+        /// Whether train_lora tasks may use this device's imported documents
+        /// (`use_local_data`). Off unless the user opted in on the device.
+        var trainOnDocuments = false
+        enum CodingKeys: String, CodingKey {
+            case kinds, model, memoryGB = "memory_gb", os, trainOnDocuments = "train_on_documents"
+        }
     }
     let name: String
     let kind: String
@@ -42,7 +47,7 @@ struct FleetEvent: Encodable, Sendable {
     static func log(_ t: String) -> FleetEvent { FleetEvent(kind: "log", text: t) }
 }
 
-struct TaskResult: Sendable {
+struct TaskResult: Codable, Sendable {
     var status: String            // succeeded | failed
     var output: String?
     var error: String?
@@ -70,20 +75,47 @@ struct FedRound: Decodable, Sendable {
 /// and within iOS's foreground networking rules.
 struct FleetClient: Sendable {
     let config: WorkerConfig
-    private let session: URLSession
+    private var session: URLSession { Self.session }
 
-    init(config: WorkerConfig) {
-        self.config = config
+    /// One session for every FleetClient: the timeouts don't depend on the
+    /// worker config, and a session per client leaked one per loop pass.
+    private static let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 45      // > the 25 s long-poll
         c.timeoutIntervalForResource = 600    // adapter uploads/downloads
         c.waitsForConnectivity = false
-        session = URLSession(configuration: c)
+        return URLSession(configuration: c)
+    }()
+
+    init(config: WorkerConfig) {
+        self.config = config
     }
 
     static func fromSettings() throws -> FleetClient {
         guard let cfg = WorkerConfig.load() else { throw WorkerError.notConfigured }
         return FleetClient(config: cfg)
+    }
+
+    /// True when `other` points at the same worker with the same token.
+    func matches(_ other: WorkerConfig) -> Bool {
+        config.baseURL == other.baseURL && config.token == other.token
+    }
+
+    /// The worker already settled this task (404 unknown, 409 no longer ours):
+    /// resending a completion can't help.
+    static func isSettled(_ error: Error) -> Bool {
+        if let w = error as? WorkerError, case .http(let code, _) = w { return code == 404 || code == 409 }
+        return false
+    }
+
+    /// A rejection that retrying won't change (4xx other than timeout/rate limit),
+    /// or a body that can't be encoded.
+    static func isPermanent(_ error: Error) -> Bool {
+        if error is EncodingError { return true }
+        if let w = error as? WorkerError, case .http(let code, _) = w {
+            return (400..<500).contains(code) && code != 408 && code != 429
+        }
+        return false
     }
 
     static let decoder: JSONDecoder = {
@@ -161,8 +193,9 @@ struct FleetClient: Sendable {
             let metrics: [String: Double]
             enum CodingKeys: String, CodingKey { case nodeID = "node_id", status, output, error, metrics }
         }
+        // JSONEncoder throws on NaN/Inf, which would leave the task unreported.
         let body = Body(nodeID: nodeID, status: result.status, output: result.output,
-                        error: result.error, metrics: result.metrics)
+                        error: result.error, metrics: result.metrics.filter { $0.value.isFinite })
         try await send("POST", "tasks/\(taskID)/complete", json: try JSONEncoder().encode(body))
     }
 
@@ -183,13 +216,52 @@ struct FleetClient: Sendable {
 /// training callback) and the async pump that posts events. Also carries the
 /// cancel flag the worker returns, so the work can poll it cheaply.
 final class TaskEventBuffer: @unchecked Sendable {
+    /// The worker reads at most 500 events per POST.
+    static let maxPerPost = 500
+    /// Cap on buffered events during a worker outage (oldest are dropped).
+    static let maxBuffered = 5_000
+
     private let lock = NSLock()
     private var pending: [FleetEvent] = []
     private var cancelled = false
     private var finished = false
+    private var dropped = 0
+    var droppedEvents: Int { lock.withLock { dropped } }
 
-    func append(_ e: FleetEvent) { lock.withLock { pending.append(e) } }
-    func drain() -> [FleetEvent] { lock.withLock { defer { pending.removeAll() }; return pending } }
+    func append(_ e: FleetEvent) {
+        lock.withLock {
+            pending.append(e)
+            trimLocked()
+        }
+    }
+
+    /// Takes up to `maxPerPost` events off the front.
+    func drain() -> [FleetEvent] {
+        lock.withLock {
+            let n = min(Self.maxPerPost, pending.count)
+            let out = Array(pending.prefix(n))
+            pending.removeFirst(n)
+            return out
+        }
+    }
+
+    /// Puts events whose POST failed back at the front, in order.
+    func requeue(_ events: [FleetEvent]) {
+        guard !events.isEmpty else { return }
+        lock.withLock {
+            pending.insert(contentsOf: events, at: 0)
+            trimLocked()
+        }
+    }
+
+    private func trimLocked() {
+        let excess = pending.count - Self.maxBuffered
+        if excess > 0 {
+            pending.removeFirst(excess)
+            dropped += excess
+        }
+    }
+
     var count: Int { lock.withLock { pending.count } }
 
     var cancelRequested: Bool { lock.withLock { cancelled } }
