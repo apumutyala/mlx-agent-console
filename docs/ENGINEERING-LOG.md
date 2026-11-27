@@ -51,6 +51,42 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Findings
 
+### Device receipts, round 1 (2026-11-27, iPad17,3 = iPad Pro 13" M5, 16 GB, iPadOS 27.2.1)
+
+- **Build:** app `71391b9` (bench branch), mlx-swift-lm 3.33.0, workload set `w1`.
+- **Method:** raw token prompts, greedy decoding, 3 reps, median shown.
+- **Conditions:** plugged in, thermal nominal throughout.
+- **Receipts:** `docs/receipts/2026-11-27/`.
+
+| Model (4-bit, g64) | Weights GB | Decode tok/s, short / 1K / 4K | TTFT 1K / 4K (s) | Prefill tok/s at 4K | Peak footprint GB | Decode MBU* |
+|---|---|---|---|---|---|---|
+| LFM2.5 350M | 0.22 | **424** / 349 / 197 | 0.09 / 0.38 | 10,660 | 1.50 | ~61% |
+| LFM2.5 1.2B Instruct | 0.66 | **169** / 160 / 139 | 0.20 / 0.80 | 5,095 | 1.45 | ~73% |
+| LFM3 1.7B (default) | 0.97 | **113** / 109 / 101 | 0.31 / 1.26 | 3,262 | 1.75 | ~72% |
+| Qwen3 1.7B (fallback) | 0.97 | **109** / 89 / 48 | 0.29 / 1.56 | 2,629 | 2.10 | ~69% |
+| LFM2.5 8B-A1B (MoE) | 4.85 | skipped | — | — | — | needs ~6.5 GB, only 5.2 GB available |
+
+\*MBU = weight bytes × short-prompt decode tok/s ÷ 153.6 GB/s, the M5 iPad memory bandwidth spec. KV reads are ignored, so the true figure is slightly higher. Short-prompt decode is about 70% of the memory-bandwidth roofline for all 1–2B models, which is typical for MLX. Headroom per token is about 30%.
+
+**Key findings**
+
+1. **The per-app memory limit is about 5.3–5.5 GB.** `os_proc_available_memory()` reads about 5.2 GB before load, at a 0.1–0.3 GB baseline footprint, on a 16 GB device.
+   - So the `increased-memory-limit` entitlement is **not** in effect under the free-Apple-ID sideload.
+   - Consequences:
+     - The LFM2.5 8B MoE (4.85 GB) does not fit.
+     - All resident Inkling tiers (9.6–12.5 GB) are impossible on this device as signed.
+     - Inkling can only run via SSD expert streaming, within a footprint budget of about 4.6 GB.
+   - Unverified alternative: a paid Apple Developer account grants the entitlement. That is a cost decision for Apuroop.
+2. **Hybrid conv/attention (LFM) holds up at long context; Qwen does not.**
+   - LFM3 decode drops only 10% from short to 4K.
+   - Qwen3, which is all-attention, drops 56% (109 → 48 tok/s), with high rep-to-rep variance at 4K (53 → 44). Its KV reads (~0.47 GB at 4K) plus an unfused attention path look like the cause. This needs a profile.
+3. **The first rep of 1K/4K includes compile warm-up.** For example, LFM3 1K prefill is 864 tok/s on rep 1 versus 3,341 after. Medians are fine, but the warm-up should cover every prompt length (workload w2).
+4. **Determinism:** every model produced identical output across all reps (fingerprints in the receipts). The 350M emits end-of-text almost immediately on raw prompts, as expected without a chat template; its throughput numbers are still valid.
+
+**Optimization targets this sets**
+- LFM3 decode at 1–2B scale is 72% of roofline, so at most about 1.35× is left from kernels.
+- The bigger levers are quality per GB within 5.3 GB, and Inkling via streaming.
+
 ### Inkling 2 Mini on a 16 GB iPad (scout report, 2026-11-26)
 
 **Model and library support**

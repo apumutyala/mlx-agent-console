@@ -13,7 +13,16 @@ Read [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) first. It covers the goa
 - The iOS app compiles only in GitHub Actions macOS:
   1. Start a build: `gh workflow run build.yml --ref <branch>`
   2. Find it: `gh run list --branch <branch> -L 1`
-  3. Wait for it: `gh run watch <id> --exit-status`
+  3. Wait for it **without calling GitHub**:
+     ```
+     python C:\Users\apumu\research\CHLabs\mlx-integration\tools\ci_status.py wait --run <id>
+     ```
+     Use `--branch <b> --after <push time>` if you don't know the id.
+- **CI polling rule (hard):**
+  - Never run `gh run watch`, and never loop `gh run view/list`. The GitHub API budget is 5,000 requests per hour, shared by every agent. A watch polls every 3 s, and on 2026-11-27 they exhausted the budget for everyone.
+  - Exactly one shared poller (`tools/ci_status.py poll`, run by the coordinator) calls GitHub once every 2 minutes and writes `~/.ci-status/mlx-agent-console.json`.
+  - `wait` and `show` only read that file.
+  - Call `gh run view <id> --log-failed` once, only for a failed run.
 - macOS minutes are expensive, so batch your fixes.
 - Keep `SWIFT_VERSION` 5.0. `MLXArray` is not `Sendable`, so serialize inside `container.perform`.
 
