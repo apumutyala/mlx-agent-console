@@ -4,19 +4,28 @@ import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import MLXVLM
 import Tokenizers
 
-/// The only file that touches MLX. Written against mlx-swift-lm 3.33.x
-/// (Hugging Face downloader/tokenizer come from the MLXHuggingFace macros).
+/// The only file that touches MLX. Written against mlx-swift-lm 3.33 plus PR #821
+/// (Inkling 2), vendored under ios/Vendor/mlx-swift-lm. The Hugging Face
+/// downloader/tokenizer come from the MLXHuggingFace macros.
 final class MLXBackend: ModelBackend, @unchecked Sendable {
     private var entry: ModelCatalog.Entry
     private var container: ModelContainer?
     /// Bumped on every switch so a load that finishes late can't install a stale model.
     private var epoch = 0
+    /// The load in progress for `epoch`, shared by every caller that asks meanwhile.
+    private var inflight: (epoch: Int, task: Task<ModelContainer, Error>)?
     private let lock = NSLock()
 
     init(entry: ModelCatalog.Entry = ModelCatalog.selected) {
         self.entry = entry
+        MemoryBudget.noteLaunch()
+        MemoryBudget.heldByModel ={ MLX.Memory.activeMemory + MLX.Memory.cacheMemory }
+        MemoryBudget.mlxSnapshot = {
+            (MLX.Memory.activeMemory, MLX.Memory.peakMemory, MLX.Memory.cacheMemory)
+        }
     }
 
     var displayName: String { lock.withLock { entry.displayName } }
@@ -27,7 +36,8 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
     /// mlx-swift-lm configuration for a catalog entry. Registered entries come
     /// from `LLMRegistry`; the rest are built here. When `toolCallFormat` is nil the
-    /// factory resolves it from the model type / chat template at load time.
+    /// factory resolves it from the model type / chat template at load time
+    /// (Inkling 2 declares `.inkling` itself).
     static func configuration(for entry: ModelCatalog.Entry) -> ModelConfiguration {
         switch entry.id {
         case ModelCatalog.lfm3_1_7b.id: return LLMRegistry.lfm3_1_7b_4bit        // .xmlFunction calls, <think>
@@ -52,6 +62,8 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
             guard wanted.id != entry.id else { return false }
             entry = wanted
             container = nil   // conversations still holding the old container keep it alive until they end
+            inflight?.task.cancel()   // stops a download in progress; a weight read finishes and is dropped
+            inflight = nil
             epoch += 1
             return true
         }
@@ -61,16 +73,84 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         reconcileSelection()
         if await isLoaded { progress(1); return }
-        let (target, startEpoch) = lock.withLock { (entry, epoch) }
-        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-        MLX.Memory.cacheLimit = 32 * 1024 * 1024
-        let loaded = try await #huggingFaceLoadModelContainer(
-            configuration: Self.configuration(for: target),
-            progress: .download { p in progress(p.fractionCompleted) }
-        )
+        // One load at a time: the chat screen and a first message can both ask, and two
+        // concurrent loads of a 10 GB model would exceed the app's memory limit.
+        let (task, startEpoch): (Task<ModelContainer, Error>, Int) = lock.withLock {
+            if let inflight, inflight.epoch == epoch { return (inflight.task, epoch) }
+            let target = entry
+            let task = Task { try await self.performLoad(target, progress: progress) }
+            inflight = (epoch, task)
+            return (task, epoch)
+        }
+        defer { lock.withLock { if inflight?.epoch == startEpoch { inflight = nil } } }
+        let loaded = try await task.value
         lock.withLock {
             if epoch == startEpoch { container = loaded }
         }
+    }
+
+    private func performLoad(_ target: ModelCatalog.Entry, progress: @escaping @Sendable (Double) -> Void)
+        async throws -> ModelContainer
+    {
+        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
+        MLX.Memory.cacheLimit = 32 * 1024 * 1024
+
+        // Big models: refuse up front rather than get the app killed mid-load.
+        let fit = MemoryBudget.fit(target)
+        if case .tooLarge(let needed, let budget) = fit, !fit.allowsLoad {
+            throw MemoryBudget.LoadError.insufficientMemory(
+                model: target.displayName, neededBytes: needed, budgetBytes: budget)
+        }
+
+        switch target.loader {
+        case .llm:
+            return try await #huggingFaceLoadModelContainer(
+                configuration: Self.configuration(for: target),
+                progress: .download { p in progress(p.fractionCompleted) }
+            )
+        case .vlm:
+            return try await loadLarge(target, progress: progress)
+        }
+    }
+
+    /// Inkling 2 and other big VLM-factory models: memory limits, a breadcrumb for loads the
+    /// system kills, and a load report for Settings.
+    private func loadLarge(_ target: ModelCatalog.Entry, progress: @escaping @Sendable (Double) -> Void)
+        async throws -> ModelContainer
+    {
+        let defaults = UserDefaults.standard
+        let availableBefore = MemoryBudget.availableBytes
+        if availableBefore > 0 {
+            // A soft cap: past it MLX waits for in-flight work before allocating more, which
+            // keeps transient peaks (prefill scratch) under the jetsam limit. It is not a
+            // hard limit, so it can't make a load fail on its own.
+            let budget = availableBefore + MemoryBudget.heldByModel()
+            MLX.Memory.memoryLimit = max(1 << 30, budget - 512 * 1024 * 1024)
+        }
+        MLX.Memory.peakMemory = 0
+        defaults.set("\(target.id) at \(Date().formatted(date: .abbreviated, time: .standard))",
+                     forKey: MemoryBudget.pendingLoadKey)
+        let started = Date()
+
+        let handlers = LoadProgressHandlers(
+            download: { p in progress(0.9 * p.fractionCompleted) },
+            weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) })
+        let loaded = try await VLMModelFactory.shared.loadContainer(
+            from: #hubDownloader(),
+            using: #huggingFaceTokenizerLoader(),
+            configuration: Self.configuration(for: target),
+            progress: handlers)
+
+        defaults.removeObject(forKey: MemoryBudget.pendingLoadKey)
+        let snapshot = MemoryBudget.mlxSnapshot()
+        let report = String(
+            format: "%@: loaded in %.0f s · MLX active %@, peak %@ · app available before %@, after %@ · MLX limit %@",
+            target.displayName, Date().timeIntervalSince(started),
+            MemoryBudget.gb(snapshot.active), MemoryBudget.gb(snapshot.peak),
+            MemoryBudget.gb(availableBefore), MemoryBudget.gb(MemoryBudget.availableBytes),
+            MemoryBudget.gb(MLX.Memory.memoryLimit))
+        defaults.set(report, forKey: MemoryBudget.lastLoadReportKey)
+        return loaded
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {
@@ -80,6 +160,10 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         var params = GenerateParameters()
         params.maxTokens = current.thinks ? 2048 : 1024   // leave room for <think> before the answer
         params.temperature = current.temperature
+        if let context = current.contextTokens { params.maxKVSize = context }
+        if let step = current.prefillStepSize { params.prefill.stepSize = step }
+        var context: [String: any Sendable]? = nil
+        if let effort = current.reasoningEffort { context = ["reasoning_effort": effort] }
         var specs: [ToolSpec]? = nil
         if !tools.isEmpty {
             specs = tools.map { (tool: ToolSpecification) -> ToolSpec in
@@ -95,7 +179,9 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         }
         // No `toolDispatch`: calls come back as `.toolCall` items so the app can
         // validate, ask for confirmation and run them itself.
-        let session = ChatSession(loadedContainer, instructions: instructions, generateParameters: params, tools: specs)
+        let session = ChatSession(
+            loadedContainer, instructions: instructions, generateParameters: params,
+            additionalContext: context, tools: specs)
         return MLXConversation(session: session)
     }
 

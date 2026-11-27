@@ -6,8 +6,10 @@ options:
     iOS: "26.0"                         # BGContinuedProcessingTask is iOS/iPadOS 26+
 packages:
   MLXSwiftLM:
-    url: https://github.com/ml-explore/mlx-swift-lm
-    exactVersion: 3.33.0                # needs Swift 6.3 tools -> Xcode 26.4+
+    # mlx-swift-lm 3.33.0 + PR #821 (Inkling 2), vendored at aleroot/mlx-swift-lm@5507b3b with
+    # two small loader patches; see Vendor/mlx-swift-lm/VENDORED.md. Needs Xcode 26.4+.
+    # Depends on mlx-swift .upToNextMinor(from: "0.33.0"), same as the 3.33.0 release.
+    path: Vendor/mlx-swift-lm
   SwiftHuggingFace:
     url: https://github.com/huggingface/swift-huggingface
     from: 0.9.0
@@ -23,6 +25,8 @@ targets:
     dependencies:
       - package: MLXSwiftLM
         product: MLXLLM
+      - package: MLXSwiftLM
+        product: MLXVLM                 # Inkling 2 (inkling2_loop) loads through VLMModelFactory
       - package: MLXSwiftLM
         product: MLXLMCommon
       - package: MLXSwiftLM

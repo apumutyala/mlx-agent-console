@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var token = Keychain.read("worker.token") ?? ""
     @State private var status: String?
     @AppStorage(ModelCatalog.storageKey) private var selectedModelID = ModelCatalog.defaultEntry.id
+    @AppStorage(MemoryBudget.overrideKey) private var ignoreMemoryCheck = false
 
     var body: some View {
         NavigationStack {
@@ -31,7 +32,7 @@ struct SettingsView: View {
                 Section {
                     Picker("Model", selection: $selectedModelID) {
                         ForEach(ModelCatalog.available) { entry in
-                            Text("\(entry.displayName) · \(entry.sizeLabel)").tag(entry.id)
+                            Text(Self.pickerLabel(entry)).tag(entry.id)
                         }
                     }
                     .onChange(of: selectedModelID) { _, id in
@@ -44,11 +45,93 @@ struct SettingsView: View {
                 } header: { Text("On-device") } footer: {
                     let entry = ModelCatalog.entry(id: selectedModelID) ?? ModelCatalog.selected
                     let hidden = ModelCatalog.all.count - ModelCatalog.available.count
-                    Text("\(entry.note) One-time download of about \(entry.sizeLabel); switching resets the chat."
-                         + (hidden > 0 ? " Larger models need a 16 GB iPad." : ""))
+                    let suffix: String = hidden > 0 ? " Larger models need a 16 GB iPad." : ""
+                    let message: String = "\(entry.note) One-time download of about \(entry.sizeLabel); "
+                        + "switching resets the chat." + Self.fitNote(entry) + suffix
+                    Text(message)
                 }
+                MemorySection(ignoreMemoryCheck: $ignoreMemoryCheck)
             }
             .navigationTitle("Settings")
         }
+    }
+
+    private static func pickerLabel(_ entry: ModelCatalog.Entry) -> String {
+        let base = "\(entry.displayName) · \(entry.sizeLabel)"
+        if case .tooLarge = MemoryBudget.fit(entry) { return base + " · too large" }
+        return base
+    }
+
+    private static func fitNote(_ entry: ModelCatalog.Entry) -> String {
+        switch MemoryBudget.fit(entry) {
+        case .unchecked: return ""
+        case .fits(let needed, let budget):
+            return " Needs ~\(MemoryBudget.gb(needed)) of the \(MemoryBudget.gb(budget)) the app may use."
+        case .tooLarge(let needed, let budget):
+            return " ⚠️ Needs ~\(MemoryBudget.gb(needed)) but the app may only use \(MemoryBudget.gb(budget)); "
+                + (MemoryBudget.ignoreCheck ? "loading anyway (check ignored)." : "it won't load.")
+        }
+    }
+}
+
+/// Live memory readout: what iOS lets this app use (reflects whether the
+/// increased-memory-limit entitlement took effect) and what MLX holds.
+private struct MemorySection: View {
+    @Binding var ignoreMemoryCheck: Bool
+
+    static func rows() -> [(String, String)] {
+        let available = MemoryBudget.availableBytes
+        let mlx = MemoryBudget.mlxSnapshot()
+        var rows: [(String, String)] = [
+            ("Physical RAM", MemoryBudget.gb(MemoryBudget.physicalBytes)),
+            ("Available to app", available > 0 ? MemoryBudget.gb(available) : "not reported"),
+            ("App limit (est.)", available > 0 ? MemoryBudget.gb(available + MemoryBudget.heldByModel()) : "–"),
+        ]
+        if let gpu = MemoryBudget.gpuWorkingSetBytes {
+            rows.append(("GPU working set", MemoryBudget.gb(gpu)))
+        }
+        rows.append(("MLX active / peak", MemoryBudget.gb(mlx.active) + " / " + MemoryBudget.gb(mlx.peak)))
+        rows.append(("MLX cache", MemoryBudget.gb(mlx.cache)))
+        return rows
+    }
+    @State private var killedLoad = UserDefaults.standard.string(forKey: MemoryBudget.killedLoadKey)
+
+    var body: some View {
+        Section {
+            TimelineView(.periodic(from: .now, by: 2)) { _ in
+                MemoryReadout(rows: Self.rows())
+            }
+            Toggle("Ignore memory check", isOn: $ignoreMemoryCheck)
+            if let report = UserDefaults.standard.string(forKey: MemoryBudget.lastLoadReportKey) {
+                Text("Last large load: \(report)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if let killedLoad {
+                Label("The load of \(killedLoad) never finished — iOS probably stopped the app for using too much memory.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("Dismiss") {
+                    UserDefaults.standard.removeObject(forKey: MemoryBudget.killedLoadKey)
+                    self.killedLoad = nil
+                }
+                .font(.caption)
+            }
+        } header: { Text("Memory") } footer: {
+            Text("“Available to app” is os_proc_available_memory(): what iOS still lets this app allocate. "
+                 + "Large models need their weights plus ~1.5 GB of it. “App limit” adds back what the "
+                 + "loaded model holds. If it stays near half the RAM, the increased-memory-limit "
+                 + "entitlement was not granted by the signing profile.")
+        }
+    }
+}
+
+private struct MemoryReadout: View {
+    let rows: [(String, String)]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(rows.indices, id: \.self) { i in
+                LabeledContent(rows[i].0, value: rows[i].1)
+            }
+        }
+        .font(.footnote.monospacedDigit())
     }
 }

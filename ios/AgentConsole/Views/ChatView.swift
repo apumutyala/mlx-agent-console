@@ -5,6 +5,7 @@ struct ChatView: View {
     let backend: any ModelBackend
     @State private var draft = ""
     @State private var loadProgress: Double?
+    @State private var loadError: String?
     /// Re-runs the load task when the model is switched in Settings.
     @AppStorage(ModelCatalog.storageKey) private var selectedModelID = ModelCatalog.defaultEntry.id
 
@@ -22,6 +23,10 @@ struct ChatView: View {
                 }
                 if let p = loadProgress, p < 1 {
                     ProgressView("Loading \(backend.displayName)…", value: p).padding()
+                }
+                if let loadError {
+                    Label(loadError, systemImage: "memorychip")
+                        .font(.footnote).foregroundStyle(.orange).padding(.horizontal)
                 }
                 HStack {
                     TextField("Ask the on-device model", text: $draft, axis: .vertical)
@@ -45,9 +50,16 @@ struct ChatView: View {
                 Button("New chat", systemImage: "square.and.pencil") { agent.reset() }
             }
             .task(id: selectedModelID) {
+                loadError = nil
                 guard !(await backend.isLoaded) else { return }
                 loadProgress = 0
-                try? await backend.load { p in Task { @MainActor in loadProgress = p } }
+                do {
+                    try await backend.load { p in Task { @MainActor in loadProgress = p } }
+                } catch is CancellationError {
+                    // superseded by another model switch
+                } catch {
+                    if !Task.isCancelled { loadError = error.localizedDescription }
+                }
                 loadProgress = 1
             }
             .alert("Allow this action?",
