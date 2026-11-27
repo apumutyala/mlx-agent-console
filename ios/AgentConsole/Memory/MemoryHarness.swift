@@ -146,6 +146,9 @@ final class MemoryHarness {
         if let c = conversations.load(conversationID),
            c.turns[c.reflectedTurnCount...].filter({ $0.role == .user }).count >= Self.reflectEveryUserTurns {
             scheduleBackgroundWork(includeActive: true)
+        } else if embedderAllowed, !embedderLoaded {
+            // First idle moment after the chat model loaded: bring the embedder in.
+            scheduleBackgroundWork(includeActive: false)
         }
     }
 
@@ -206,7 +209,8 @@ final class MemoryHarness {
                 await reflect(conversationID: id)
             }
         }
-        guard !Task.isCancelled, !agentBusy else { return }
+        // Only after the chat model is in: two weight loads at once would race on MLX.
+        guard !Task.isCancelled, !agentBusy, await backend.isLoaded else { return }
         await refreshEmbeddings()
         let n = await memories.count
         if !Task.isCancelled { status = "Up to date · \(n) memories" }
