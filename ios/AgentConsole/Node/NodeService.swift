@@ -182,6 +182,7 @@ final class NodeService {
         let device = UIDevice.current
         var kinds = ["generate"]
         if canTrain { kinds.append("train_lora") }
+        if backend is MLXBackend { kinds.append("bench") }
         return NodeInfo(
             name: device.name, kind: "ipad",
             capabilities: .init(kinds: kinds, model: backend.displayName,
@@ -276,6 +277,8 @@ final class NodeService {
                     result = try await runGenerate(data, buffer: buffer)
                 case "train_lora":
                     result = try await runTrain(data, taskID: taskID, buffer: buffer, client: client)
+                case "bench":
+                    result = try await runBench(data, buffer: buffer)
                 default:
                     result = .failure("This node can't run \(head.kind) tasks.")
                 }
@@ -469,6 +472,75 @@ final class NodeService {
                           metrics: ["tokens": Double(tokens), "seconds": seconds, "tokens_per_second": tps])
     }
 
+    // MARK: bench
+
+    /// A benchmark replaced the loaded model, so an applied federated adapter is gone
+    /// (FederatedTrainer notices by itself: it holds the converted container weakly).
+    func modelWasUnloadedByBenchmark() {
+        if adapterStatus?.hasPrefix("Using round") == true {
+            adapterStatus = "A benchmark reloaded the base model, so the federated adapter is no longer applied. "
+                + "Tap Use federated adapter to apply it again."
+        }
+    }
+
+    private struct BenchPayload: Decodable {
+        let modelId: String?
+        let workloadIds: [String]?
+        let repetitions: Int?
+    }
+
+    /// Runs the Bench screen's workload set (BenchmarkRunner) on one catalog
+    /// model and completes with the schema-v1 receipt JSON as output. The
+    /// receipt is also saved on the iPad and posted to the worker's /receipts.
+    private func runBench(_ data: Data, buffer: TaskEventBuffer) async throws -> TaskResult {
+        guard let mlx = backend as? MLXBackend else { throw NodeError.cannotBench }
+        let p = try FleetClient.decodeTask(data, payload: BenchPayload.self).payload
+        let entry: ModelCatalog.Entry
+        if let id = p.modelId {
+            guard let e = ModelCatalog.entry(id: id) else {
+                throw BenchError.unknownModel(id, known: ModelCatalog.all.map(\.id))
+            }
+            entry = e
+        } else {
+            entry = ModelCatalog.selected
+        }
+        _ = try BenchWorkloads.workloads(ids: p.workloadIds)   // fail fast on an unknown id
+        status = "Benchmarking \(entry.displayName)"
+        onModelChanged()   // the runner unloads the chat model
+        modelWasUnloadedByBenchmark()
+        let receipt = await BenchmarkRunner(backend: mlx).run(
+            entry: entry, workloadIDs: p.workloadIds,
+            repetitions: p.repetitions ?? BenchmarkRunner.defaultRepetitions,
+            progress: { buffer.append(.progress($0.fraction, $0.message)) },
+            isCancelled: { buffer.cancelRequested })
+        onModelChanged()
+        if receipt.status == "cancelled" { throw CancellationError() }
+
+        if let url = try? ReceiptStore.save(receipt) {
+            do {
+                if let name = try await ReceiptStore.upload(url) { buffer.append(.log("receipt stored as \(name)")) }
+            } catch {
+                buffer.append(.log("receipt upload failed: \(error.localizedDescription)"))
+            }
+        }
+        var metrics: [String: Double] = ["total_s": receipt.totalWallS]
+        if let l = receipt.load {
+            metrics["first_load_s"] = l.firstLoadS
+            metrics["warm_load_s"] = l.warmLoadS
+        }
+        for w in receipt.workloads {
+            metrics["\(w.id).ttft_s"] = w.median.ttftS
+            metrics["\(w.id).prefill_tps"] = w.median.prefillTps
+            metrics["\(w.id).decode_tps"] = w.median.decodeTps
+            metrics["\(w.id).peak_footprint_mb"] = Double(w.median.peakFootprintBytes) / 1e6
+        }
+        if let tps = receipt.workloads.first?.median.decodeTps { lastTokensPerSecond = tps }
+        let json = String(decoding: try BenchReceipt.encoder.encode(receipt), as: UTF8.self)
+        let ok = receipt.status == "ok" || receipt.status == "skipped"
+        return TaskResult(status: ok ? "succeeded" : "failed", output: json,
+                          error: ok ? nil : (receipt.error ?? receipt.status), metrics: metrics)
+    }
+
     // MARK: train_lora
 
     /// Per-field cap, matching the MCP `start_fed_round` schema.
@@ -511,6 +583,7 @@ final class NodeService {
         case trainingOff
         case documentsOff
         case badInitAdapter(String)
+        case cannotBench
         case wrongModel(want: String, have: String)
         var errorDescription: String? {
             switch self {
@@ -520,6 +593,7 @@ final class NodeService {
             case .documentsOff:
                 "This round wants to train on the iPad's imported documents, which the user hasn't allowed (Settings → Compute node → Allow federated training on my documents)."
             case .badInitAdapter(let path): "Refusing init_adapter \(path): not a federated round adapter path."
+            case .cannotBench: "This node's backend can't run benchmarks."
             case .wrongModel(let want, let have):
                 "Round is for \(want) but this iPad has \(have) loaded."
             }

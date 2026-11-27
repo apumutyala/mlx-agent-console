@@ -28,6 +28,13 @@ final class AppModel {
         backend: backend, documents: documents,
         trainer: (backend as? MLXBackend).map { FederatedTrainer(backend: $0) },
         onModelChanged: { [unowned self] in self.agent.invalidateConversation() })
+    lazy var bench = BenchCoordinator(
+        backend: backend as? MLXBackend,
+        onModelUnloaded: { [unowned self] in
+            self.agent.invalidateConversation()
+            self.node.modelWasUnloadedByBenchmark()
+        },
+        releaseOtherModels: { [unowned self] in await self.memory.releaseForBenchmark() })
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
@@ -56,6 +63,7 @@ struct AgentConsoleApp: App {
             }
             AppModel.shared.memory.scenePhaseChanged(phase)
             AppModel.shared.node.scenePhaseChanged(phase)
+            AppModel.shared.bench.scenePhaseChanged(phase)   // abort a run before Metal work is refused
         }
     }
 }
@@ -69,6 +77,7 @@ struct RootView: View {
                 DocumentsView(documents: model.documents, batches: model.batches, coordinator: model.batchCoordinator)
             }
             Tab("Jobs", systemImage: "server.rack") { JobsListView() }
+            Tab("Bench", systemImage: "speedometer") { BenchView(coordinator: model.bench) }
             Tab("Settings", systemImage: "gear") { SettingsView() }
         }
         .task { model.node.resumeIfEnabled() }   // "Serve tasks" survives relaunch

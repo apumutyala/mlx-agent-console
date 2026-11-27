@@ -133,7 +133,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(names, {"list_job_types", "list_jobs", "get_job", "get_job_events",
                                  "start_job", "cancel_job", "retry_job", "decide_approval",
                                  "list_nodes", "run_on_node", "broadcast_prompt", "get_task", "cancel_task",
-                                 "start_fed_round", "get_fed_rounds"})
+                                 "start_fed_round", "get_fed_rounds", "list_receipts"})
         self.assertIn("error", self.rpc("nope"))
 
     def test_full_flow_start_follow_approval_cancel(self):
@@ -309,6 +309,43 @@ class BridgeTests(unittest.TestCase):
             stop.set()
             for th in nodes:
                 th.join(5)
+
+    def test_list_receipts_tool(self):
+        _, out = self.tool("list_receipts")
+        self.assertEqual(out["receipts"], [])
+        for mid in ("lfm3-1.7b", "qwen3-1.7b"):
+            self.router.receipts.save(json.dumps({
+                "schema": 1, "model": {"id": mid, "repo": "r/" + mid},
+                "workloads": [{"id": "short-128", "median": {"decode_tps": 50.0}, "output_hash": "ab"}]}).encode())
+        _, out = self.tool("list_receipts", model="qwen3-1.7b")
+        self.assertEqual([r["model"]["id"] for r in out["receipts"]], ["qwen3-1.7b"])
+        self.assertEqual(out["receipts"][0]["workloads"][0]["decode_tps"], 50.0)
+        self.assertIn("note", out)
+        _, full = self.tool("list_receipts", receipt=out["receipts"][0]["name"])
+        self.assertEqual(full["receipt"]["model"]["repo"], "r/qwen3-1.7b")
+        res, _ = self.tool("list_receipts", receipt="../../etc/passwd")
+        self.assertTrue(res["isError"])
+        res, _ = self.tool("list_receipts", limit=0)
+        self.assertTrue(res["isError"])
+        # Big receipts: every text block stays valid JSON with the untrusted-data note first.
+        reps = [{"index": i, "ttft_s": 0.1, "output_hash": "f" * 64, "thermal_before": "nominal" * 20}
+                for i in range(10)]
+        for k in range(12):
+            self.router.receipts.save(json.dumps({
+                "schema": 1, "model": {"id": "big", "repo": "r/big", "display_name": "B" * 120},
+                "skip_reason": "s" * 5000, "error": "e" * 5000,
+                "workloads": [{"id": f"w{j}", "reps": reps, "output_token_ids": list(range(64)),
+                               "output_preview": "p" * 300, "median": {"decode_tps": 1.0}}
+                              for j in range(30)]}).encode())
+        _, big = self.tool("list_receipts", model="big", limit=50)
+        res, _ = self.tool("list_receipts", receipt=big["receipts"][0]["name"])
+        for r in (self.tool("list_receipts", model="big", limit=50)[0], res):
+            text = r["content"][0]["text"]
+            parsed = json.loads(text)  # not clipped mid-JSON
+            self.assertEqual(next(iter(parsed)), "note")
+        self.assertTrue(json.loads(res["content"][0]["text"])["clipped"])
+        # read-only: not rate limited as a write
+        self.assertNotIn("list_receipts", mcp_bridge.WRITE_TOOLS)
 
     def test_connection_cap(self):
         import socket
