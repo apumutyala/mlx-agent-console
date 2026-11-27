@@ -7,7 +7,21 @@ struct DocumentSummarizer: Sendable {
     let documents: DocumentStore
     var chunkChars = 6_000
 
+    /// Holds the shared GPU gate for the whole document, so a fleet task can't
+    /// slip in between chunks (covers both batches and the chat's summarize tool).
     func summarize(_ doc: ImportedDocument) async throws -> String {
+        await GPUGate.shared.acquire("summary")
+        do {
+            let summary = try await summarizeHoldingGate(doc)
+            await GPUGate.shared.release()
+            return summary
+        } catch {
+            await GPUGate.shared.release()
+            throw error
+        }
+    }
+
+    private func summarizeHoldingGate(_ doc: ImportedDocument) async throws -> String {
         if !(await backend.isLoaded) { try await backend.load { _ in } }
         let text = try await documents.text(of: doc)
         guard !text.isEmpty else { return "(no extractable text)" }

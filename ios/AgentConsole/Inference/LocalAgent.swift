@@ -91,6 +91,27 @@ final class LocalAgent {
 
     func stop() { task?.cancel() }
 
+    /// The model's weights changed (e.g. a LoRA adapter was trained or loaded),
+    /// so the conversation's KV cache no longer matches. The next message starts
+    /// a fresh conversation; the transcript stays on screen.
+    func invalidateConversation() {
+        conversation = nil
+    }
+
+    /// Model work holds the shared GPU gate so fleet tasks can't interleave.
+    /// Tool calls run outside it (the summarize tool takes the gate itself).
+    private func withGPU<T>(_ body: () async throws -> T) async throws -> T {
+        await GPUGate.shared.acquire("chat")
+        do {
+            let value = try await body()
+            await GPUGate.shared.release()
+            return value
+        } catch {
+            await GPUGate.shared.release()
+            throw error
+        }
+    }
+
     func send(_ text: String) {
         guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         turns.append(Turn(role: .user, text: text))
@@ -133,24 +154,29 @@ final class LocalAgent {
     }
 
     private func run(userMessage: String) async {
-        var prefix = ""
         do {
-            // Reflection/embedding must not share the GPU with this turn.
+            // Reflection/embedding must not share the GPU with this turn
+            // (cancelled before we queue for the gate, so no gate deadlock).
             await memory?.preemptBackgroundWork()
-            if !(await backend.isLoaded) {
-                try await backend.load { _ in }
-            }
-            if conversation == nil {
+            // Model load and conversation setup touch the GPU: take the shared gate so a
+            // fleet task or batch summary can't run at the same time.
+            let (conversation, tools, prefix): (any ModelConversation, ToolRegistry, String) = try await withGPU {
+                if !(await backend.isLoaded) {
+                    try await backend.load { _ in }
+                }
+                if let existing = self.conversation, let registry = self.tools {
+                    // Later turns: memories newly relevant to this message ride along with it.
+                    let note = await memory?.turnContext(userMessage, conversationID: conversationID)
+                    return (existing, registry, note ?? "")
+                }
                 let registry = toolsProvider()
-                tools = registry
-                conversation = try await backend.makeConversation(
+                let fresh = try await backend.makeConversation(
                     instructions: await instructions(tools: registry, firstMessage: userMessage),
                     tools: registry.specifications)
-            } else if let note = await memory?.turnContext(userMessage, conversationID: conversationID) {
-                // Later turns: memories newly relevant to this message ride along with it.
-                prefix = note
+                self.tools = registry
+                self.conversation = fresh
+                return (fresh, registry, "")
             }
-            guard let conversation, let tools else { return }
 
             var next = Next.user(prefix + userMessage)
             for _ in 0...Self.maxToolSteps {
@@ -166,6 +192,9 @@ final class LocalAgent {
                 case .user(let text): stream = conversation.send(text)
                 case .toolResult(let result): stream = conversation.sendToolResults([result])
                 }
+                // Hold the GPU gate only while tokens stream (tool calls run outside it,
+                // so a tool that itself needs the model can't deadlock).
+                try await withGPU {
                 for try await event in stream {
                     try Task.checkCancellation()
                     switch event {
@@ -180,6 +209,7 @@ final class LocalAgent {
                     turns[idx].thinking = [reasoning, split.thinking]
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }.joined(separator: "\n")
+                }
                 }
 
                 if let rejection, nativeCall == nil {

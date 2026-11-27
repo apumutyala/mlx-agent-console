@@ -15,6 +15,9 @@ protocol ModelBackend: AnyObject, Sendable {
     /// and parsed back into structured calls by the inference library).
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation
 
+    /// Same, with per-conversation sampling and no tools (fleet `generate` tasks set these).
+    func makeConversation(instructions: String, maxTokens: Int, temperature: Float) async throws -> any ModelConversation
+
     /// Persist `entry` as the selected model and unload the current one if it differs.
     func switchModel(to entry: ModelCatalog.Entry) async
 }
@@ -24,6 +27,10 @@ extension ModelBackend {
         try await makeConversation(instructions: instructions, tools: [])
     }
     func switchModel(to entry: ModelCatalog.Entry) async {}
+    // Backends without tunable sampling just ignore the knobs.
+    func makeConversation(instructions: String, maxTokens: Int, temperature: Float) async throws -> any ModelConversation {
+        try await makeConversation(instructions: instructions)
+    }
 }
 
 /// A tool as declared to the model: an OpenAI-style function schema.

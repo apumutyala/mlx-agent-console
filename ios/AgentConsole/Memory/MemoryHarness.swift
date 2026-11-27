@@ -228,8 +228,11 @@ final class MemoryHarness {
         // Give the model a little context from before the watermark.
         let context = Array(conv.turns[max(0, start - 4)...])
         do {
-            let result = try await Reflector(backend: backend)
-                .reflect(turns: context, playbook: entries, previousEpisode: previous?.text)
+            let reflector = Reflector(backend: backend)
+            let result = try await Self.withGPU("memory reflection") {
+                try Task.checkCancellation()
+                return try await reflector.reflect(turns: context, playbook: entries, previousEpisode: previous?.text)
+            }
             try Task.checkCancellation()
             switch result {
             case .success(let r):
@@ -277,14 +280,20 @@ final class MemoryHarness {
         do {
             if !(await embedder.isLoaded) {
                 status = "Loading embedding model…"
-                try await embedder.load()
+                let embedder = self.embedder
+                try await Self.withGPU("memory embedder load") { try await embedder.load() }
             }
             embedderLoaded = true
             while !Task.isCancelled, !agentBusy {
                 let batch = await memories.missingEmbeddings(model: MemoryEmbedder.modelID, limit: 16)
                 guard !batch.isEmpty else { break }
                 status = "Indexing memories…"
-                let vectors = try await embedder.embed(batch.map(\.text), role: .document)
+                let embedder = self.embedder
+                let texts = batch.map(\.text)
+                let vectors = try await Self.withGPU("memory indexing") {
+                    try Task.checkCancellation()
+                    return try await embedder.embed(texts, role: .document)
+                }
                 for (r, v) in zip(batch, vectors) {
                     await memories.setEmbedding(id: r.id, vector: v, model: MemoryEmbedder.modelID)
                 }
@@ -297,12 +306,37 @@ final class MemoryHarness {
 
     // MARK: Tool support
 
-    /// Embeds one fresh record right away when the embedder is resident
-    /// (called from tools, between generations).
+    /// Embeds one fresh record right away when the embedder is resident.
+    /// Called from tools, which run outside the chat's GPU gate, so it takes the gate.
     func embedIfPossible(_ record: MemoryRecord) async {
-        guard embedderAllowed, await embedder.isLoaded,
-              let v = try? await embedder.embed([record.text], role: .document).first else { return }
+        guard embedderAllowed, await embedder.isLoaded else { return }
+        let embedder = self.embedder
+        let text = record.text
+        guard let v = try? await Self.withGPU("memory embed", { try await embedder.embed([text], role: .document) }).first
+        else { return }
         await memories.setEmbedding(id: record.id, vector: v, model: MemoryEmbedder.modelID)
+    }
+
+    /// Query vector for tool-side retrieval (outside the chat's gate), or nil.
+    func queryVectorOutsideGate(_ query: String) async -> [Float]? {
+        guard embedderAllowed, await embedder.isLoaded else { return nil }
+        let embedder = self.embedder
+        return try? await Self.withGPU("memory recall", { try await embedder.embed([query], role: .query) }).first
+    }
+
+    /// Background/tool model work shares `GPUGate` with chat, summaries and
+    /// fleet tasks. Never call this while already holding the gate (it isn't
+    /// reentrant): context assembly runs inside the chat's gate and embeds directly.
+    nonisolated static func withGPU<T: Sendable>(_ who: String, _ body: @Sendable () async throws -> T) async throws -> T {
+        await GPUGate.shared.acquire(who)
+        do {
+            let value = try await body()
+            await GPUGate.shared.release()
+            return value
+        } catch {
+            await GPUGate.shared.release()
+            throw error
+        }
     }
 
     func isTainted(_ conversationID: UUID) -> Bool {

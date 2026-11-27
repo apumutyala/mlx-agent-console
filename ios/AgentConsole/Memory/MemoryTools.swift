@@ -82,10 +82,7 @@ struct RecallTool: AgentTool {
     }
 
     func run(_ args: Arguments) async throws -> String {
-        var qv: [Float]?
-        if await harness.embedderAllowed, await harness.embedder.isLoaded {
-            qv = try? await harness.embedder.embed([args.query], role: .query).first
-        }
+        let qv = await harness.queryVectorOutsideGate(args.query)
         let hits = await harness.memories.search(args.query, queryVector: qv, embeddingModel: MemoryEmbedder.modelID,
                                                  limit: args.limit ?? 6)
             .filter { $0.score > 0.05 }.map(\.record)
