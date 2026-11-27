@@ -111,7 +111,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 - **New CI step:** `ios/tools/kernels/check_metal_kernels.py` regenerates the Metal source MLX builds for `MLXFast.metalKernel` (header, signature, template instantiation) and compiles it with `xcrun metal` against MLX's `utils.h`: 122 instantiations of the three expert kernels. Add specs to cover other runtime kernels.
 - **Device self-check:** Settings → Memory → "Inkling kernel self-check on load" runs fused vs unfused on a random Mini-shaped layer for each format before the weights load and shows max |Δ| per case.
 - **Review fixes (6 findings):** the A/B switch is lock-backed and set only at model load, so one generation can't mix paths; self-check peak is derived in one place (`peakBytes()`, 223 MB) and the app skips it below that + 256 MB; the NumPy port pins the Metal source's SHA-256 and fails CI when the kernels change; patches relabelled K1/K2.
-- **PR / CI:** [PR #8](https://github.com/apumutyala/mlx-agent-console/pull/8) (depends on #2); CI green, run 45956519987: numpy 8 OK, app build OK, Metal check 122/122 compiled against MLX `utils.h`.
+- **PR / CI:** [PR #8](https://github.com/apumutyala/mlx-agent-console/pull/8) (depends on #2); CI green, run 45956519987, and after the review fixes run 45959456792: numpy 8 OK, app build OK, Metal check 122/122 compiled against MLX `utils.h`.
 - **Not verified:** nothing ran on the iPad: speed and greedy equivalence need the A/B in the PR. The app limit on the user's iPad is ~5.3 GB, so the A/B runs on the streamed tiers, which use the same kernels.
 
 ### 2026-11-27
