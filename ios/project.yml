@@ -58,6 +58,7 @@ targets:
       path: AgentConsole/Info.plist
       properties:
         CFBundleDisplayName: Agent Console
+        AppGitSHA: $(APP_GIT_SHA)       # benchmark receipts record the build; CI passes APP_GIT_SHA=$GITHUB_SHA
         UILaunchScreen: {}
         UISupportedInterfaceOrientations~ipad:
           [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown,
@@ -76,3 +77,4 @@ targets:
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
+        APP_GIT_SHA: unknown            # overridden on the xcodebuild command line in CI

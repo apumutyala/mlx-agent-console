@@ -133,7 +133,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(names, {"list_job_types", "list_jobs", "get_job", "get_job_events",
                                  "start_job", "cancel_job", "retry_job", "decide_approval",
                                  "list_nodes", "run_on_node", "broadcast_prompt", "get_task", "cancel_task",
-                                 "start_fed_round", "get_fed_rounds"})
+                                 "start_fed_round", "get_fed_rounds", "list_receipts"})
         self.assertIn("error", self.rpc("nope"))
 
     def test_full_flow_start_follow_approval_cancel(self):
@@ -309,6 +309,26 @@ class BridgeTests(unittest.TestCase):
             stop.set()
             for th in nodes:
                 th.join(5)
+
+    def test_list_receipts_tool(self):
+        _, out = self.tool("list_receipts")
+        self.assertEqual(out["receipts"], [])
+        for mid in ("lfm3-1.7b", "qwen3-1.7b"):
+            self.router.receipts.save(json.dumps({
+                "schema": 1, "model": {"id": mid, "repo": "r/" + mid},
+                "workloads": [{"id": "short-128", "median": {"decode_tps": 50.0}, "output_hash": "ab"}]}).encode())
+        _, out = self.tool("list_receipts", model="qwen3-1.7b")
+        self.assertEqual([r["model"]["id"] for r in out["receipts"]], ["qwen3-1.7b"])
+        self.assertEqual(out["receipts"][0]["workloads"][0]["decode_tps"], 50.0)
+        self.assertIn("note", out)
+        _, full = self.tool("list_receipts", receipt=out["receipts"][0]["name"])
+        self.assertEqual(full["receipt"]["model"]["repo"], "r/qwen3-1.7b")
+        res, _ = self.tool("list_receipts", receipt="../../etc/passwd")
+        self.assertTrue(res["isError"])
+        res, _ = self.tool("list_receipts", limit=0)
+        self.assertTrue(res["isError"])
+        # read-only: not rate limited as a write
+        self.assertNotIn("list_receipts", mcp_bridge.WRITE_TOOLS)
 
     def test_connection_cap(self):
         import socket

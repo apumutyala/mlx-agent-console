@@ -202,6 +202,79 @@ class FleetTests(unittest.TestCase):
         _, done = self.c.call("GET", f"/fed/rounds/{r['id']}")
         self.assertEqual(done["status"], "failed")
 
+    # ------------------------------------------------------------- bench --
+    @staticmethod
+    def receipt(model="lfm3-1.7b", decode=61.2, pad=0):
+        return {"schema": 1, "app_git_sha": "abc123", "created_at": "2026-11-26T10:00:00Z", "status": "ok",
+                "device": {"machine": "iPad17,3", "os": "iPadOS 27.2.1", "physical_memory_bytes": 16 << 30},
+                "model": {"id": model, "repo": "LiquidAI/LFM3-1.7B-MLX-4bit"},
+                "workload_set": "w1", "load": {"warm_load_s": 1.2},
+                "workloads": [{"id": "short-128", "prompt_tokens": 23, "output_hash": "deadbeef",
+                               "deterministic": True,
+                               "median": {"ttft_s": 0.05, "prefill_tps": 460.0, "decode_tps": decode,
+                                          "peak_footprint_bytes": 1_400_000_000}}],
+                "padding": "x" * pad}
+
+    def test_receipts_post_list_get(self):
+        self.assertEqual(self.c.call("GET", "/receipts"), (200, {"receipts": []}))
+        st, a = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt()).encode())
+        self.assertEqual(st, 201, a)
+        self.assertRegex(a["name"], r"^\d{8}T\d{6}Z-lfm3-1\.7b\.json$")
+        st, b = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(decode=70.0)).encode())
+        self.assertEqual(st, 201, b)
+        self.assertNotEqual(a["name"], b["name"])  # same second: suffixed, never overwritten
+        self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(model="../../qwen3")).encode())
+        stored = sorted(p.name for p in (Path(self.tmp.name) / "receipts").iterdir())
+        self.assertEqual(len(stored), 3)
+        self.assertTrue(all("/" not in n and ".." not in n for n in stored))
+        st, page = self.c.call("GET", "/receipts?model=lfm3-1.7b")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(page["receipts"]), 2)
+        s = page["receipts"][0]
+        self.assertEqual(s["model"]["id"], "lfm3-1.7b")
+        self.assertEqual(s["device"]["machine"], "iPad17,3")
+        self.assertIn(s["workloads"][0]["decode_tps"], (61.2, 70.0))
+        self.assertNotIn("padding", s)
+        self.assertEqual(len(self.c.call("GET", "/receipts?limit=1")[1]["receipts"]), 1)
+        st, full = self.c.call("GET", f"/receipts/{a['name']}")
+        self.assertEqual(st, 200)
+        self.assertEqual(full["workloads"][0]["median"]["decode_tps"], 61.2)
+        self.assertEqual(self.c.call("GET", "/receipts/..%2F..%2Fnodes.json")[0], 404)
+        self.assertEqual(self.c.call("GET", "/receipts/20261126T000000Z-nope.json")[0], 404)
+
+    def test_receipts_validation(self):
+        self.assertEqual(self.c.call("POST", "/receipts", raw=b"not json")[0], 400)
+        self.assertEqual(self.c.call("POST", "/receipts", raw=b"[1, 2]")[0], 400)
+        self.assertEqual(self.c.call("POST", "/receipts", raw=json.dumps({"schema": 2}).encode())[0], 400)
+        st, err = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(pad=300_000)).encode())
+        self.assertEqual(st, 413, err)
+        self.assertEqual(self.c.call("GET", "/receipts?limit=x")[0], 400)
+        self.assertEqual(self.c.call("GET", "/receipts")[1], {"receipts": []})
+        self.assertEqual(Client(self.c.base, "nope").call("GET", "/receipts")[0], 401)
+
+    def test_bench_task_roundtrip(self):
+        self.node("ipad-1")  # generate-only node never gets bench work
+        self.node("ipad-2", kinds=("generate", "bench"))
+        st, t = self.c.call("POST", "/tasks", {"kind": "bench", "payload": {
+            "model_id": "lfm3-1.7b", "workload_ids": ["short-128"], "repetitions": 1}})
+        self.assertEqual(st, 201, t)
+        self.assertIsNone(self.c.call("GET", "/nodes/ipad-1/next?wait=0.2")[1]["task"])
+        _, nxt = self.c.call("GET", "/nodes/ipad-2/next?wait=2")
+        self.assertEqual(nxt["task"]["kind"], "bench")
+        self.assertEqual(nxt["task"]["payload"]["workload_ids"], ["short-128"])
+        receipt = json.dumps(self.receipt())
+        _, done = self.c.call("POST", f"/tasks/{t['id']}/complete",
+                              {"node_id": "ipad-2", "status": "succeeded", "output": receipt,
+                               "metrics": {"short-128.decode_tps": 61.2}})
+        self.assertEqual(done["status"], "succeeded")
+        self.assertEqual(json.loads(done["output"])["model"]["id"], "lfm3-1.7b")
+        _, nodes = self.c.call("GET", "/nodes")
+        self.assertIn("bench", next(n for n in nodes["nodes"] if n["id"] == "ipad-2")["capabilities"]["kinds"])
+        for bad in ({"model_id": 3}, {"workload_ids": "short-128"}, {"workload_ids": []},
+                    {"repetitions": 0}, {"repetitions": True}):
+            self.assertEqual(self.c.call("POST", "/tasks", {"kind": "bench", "payload": bad})[0], 400, bad)
+        self.assertEqual(self.c.call("POST", "/tasks", {"kind": "bench", "payload": {}})[0], 201)
+
 
 if __name__ == "__main__":
     unittest.main()

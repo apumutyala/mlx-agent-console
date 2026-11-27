@@ -69,15 +69,34 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         reconcileSelection()
         if await isLoaded { progress(1); return }
         let (target, startEpoch) = lock.withLock { (entry, epoch) }
-        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-        MLX.Memory.cacheLimit = 32 * 1024 * 1024
-        let loaded = try await #huggingFaceLoadModelContainer(
-            configuration: Self.configuration(for: target),
-            progress: .download { p in progress(p.fractionCompleted) }
-        )
+        let loaded = try await Self.loadContainer(for: target, progress: progress)
         lock.withLock {
             if epoch == startEpoch { container = loaded }
         }
+    }
+
+    /// MLX's free-buffer cache limit on iPad; weights dominate memory.
+    static let mlxCacheLimit = 32 * 1024 * 1024
+
+    /// Download (first time) and load a catalog entry's weights into a new container.
+    /// The one place weights are loaded, so chat, fleet and benchmarks load identically.
+    static func loadContainer(for entry: ModelCatalog.Entry,
+                              progress: @escaping @Sendable (Double) -> Void) async throws -> ModelContainer {
+        MLX.Memory.cacheLimit = mlxCacheLimit
+        return try await #huggingFaceLoadModelContainer(
+            configuration: configuration(for: entry),
+            progress: .download { p in progress(p.fractionCompleted) }
+        )
+    }
+
+    /// Drop the loaded weights but keep the selection; the next `load` reloads them.
+    /// Benchmarks call this so the chat model isn't resident next to the one being measured.
+    func unload() {
+        lock.withLock {
+            container = nil   // conversations still holding it keep it alive until they end
+            epoch += 1
+        }
+        MLX.Memory.clearCache()
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {

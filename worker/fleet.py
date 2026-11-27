@@ -13,6 +13,9 @@ result. This works through NAT, Tailscale, and iOS's foreground-only networking.
 
     GET  /nodes                          fleet view (online = seen in the last 75 s)
     POST /tasks                          {"kind": "generate", "payload": {...}, "node": optional id}
+                                         kinds: generate | train_lora | bench
+                                         (bench payload: {"model_id"?, "workload_ids"?, "repetitions"?};
+                                          the node completes with the receipt JSON as output)
     GET  /tasks, /tasks/{id}, /tasks/{id}/events?after=&wait=
     POST /tasks/{id}/cancel
     GET  /tasks/{id}/artifacts/{name}
@@ -31,7 +34,7 @@ from pathlib import Path
 
 from jobworker import Job, now
 
-TASK_KINDS = {"generate", "train_lora"}
+TASK_KINDS = {"generate", "train_lora", "bench"}
 TASK_TERMINAL = {"succeeded", "failed", "cancelled", "lost"}
 NODE_ID = re.compile(r"^[A-Za-z0-9._-]{4,64}$")
 ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -153,6 +156,17 @@ class Fleet:
             raise LookupError(f"no such node: {node}")
         if kind == "generate" and not isinstance(payload.get("prompt"), str):
             raise ValueError("generate needs payload.prompt (string)")
+        if kind == "bench":
+            mid = payload.get("model_id")
+            wl = payload.get("workload_ids")
+            reps = payload.get("repetitions")
+            if mid is not None and not (isinstance(mid, str) and 0 < len(mid) <= 64):
+                raise ValueError("bench payload.model_id must be a catalog id string")
+            if wl is not None and not (isinstance(wl, list) and 0 < len(wl) <= 16
+                                       and all(isinstance(w, str) and 0 < len(w) <= 64 for w in wl)):
+                raise ValueError("bench payload.workload_ids must be a non-empty list of strings")
+            if reps is not None and (isinstance(reps, bool) or not isinstance(reps, int) or not 1 <= reps <= 10):
+                raise ValueError("bench payload.repetitions must be an integer in [1, 10]")
         tid = new_task_id()
         d = self.root / "tasks" / tid
         d.mkdir(parents=True)

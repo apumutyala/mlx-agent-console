@@ -48,6 +48,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | QR pairing (`worker/pair.ps1`) | not yet | no | VisionKit scanner |
 | Inkling 2 Mini | in progress | no | see findings below |
 | Memory harness + document tools | in progress | no | |
+| Bench tab + receipts (`bench`) | see PR | no | worker `/receipts` + `list_receipts` tests pass |
 
 ## Findings
 
@@ -86,7 +87,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 | # | Item | Expected lever | Status |
 |---|---|---|---|
-| O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | todo |
+| O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | profiler built (`bench` PR); device run pending |
 | O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | todo; upstream candidate |
 | O3 | Inkling expert streaming / mmap of routed experts | fits 8–12 GB devices, frees RAM | research |
 | O4 | KV cache quantization / smaller prefill step on iPad | memory headroom, longer context | todo |
@@ -102,6 +103,20 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-26: `bench` (on-device profiler + receipts, backlog O1)
+- **App:** new Bench tab. It runs the fixed workload set `w1` on one catalog entry or on every entry: `short-128` (short prompt → 128 tokens), `1k-256` (1024 prompt tokens → 256), `4k-256` (4096 → 256).
+  - Prompts are raw token ids with no chat template, cut to an exact length per model from a bundled synthetic text (SplitMix64, seeded). Decoding is greedy with seed 1234, and every rep decodes exactly `max_tokens`; the first stop-token index is recorded.
+  - Each run makes a first load (flagged when download progress was seen) and a warm reload, then an 8-token warm-up, then N=3 reps per workload, reporting the median and min/max.
+  - Metrics per rep: TTFT, prefill tok/s, decode tok/s (first token excluded), and mlx-swift-lm's own `promptPrefillTime`. Memory: `phys_footprint` peak sampled every 50 ms, `os_proc_available_memory` min/before/after, and MLX active/peak/cache. Also thermal before/after/max, battery, and Low Power Mode.
+  - Output fingerprint: SHA-256 of the first 64 greedy token ids, plus a check that all reps match.
+  - The token loop drives `TokenIterator` directly, not `generate`, so EOS can't shorten a run. Timing uses the same clock points as `GenerateCompletionInfo`.
+- **Receipts:** schema v1 JSON in Application Support/receipts. They can be exported from the share sheet and are POSTed to the worker when one is configured. Models that don't fit (weights + 1.5 GB headroom > available memory, or below the catalog minimum) get a `skipped` receipt with the reason.
+  - New catalog entries are benchmarked automatically. `MLXBackend.loadContainer(for:)` is now the single load path; `inkling2` should put any special loading there.
+- **Fleet:** new `bench` task kind (payload `model_id`, `workload_ids`, `repetitions`). The node completes it with the receipt JSON as output and per-workload metrics.
+- **Worker:** `POST/GET /receipts` and `GET /receipts/<name>` (`worker/receipts.py`, max 256 KB, schema 1, never overwritten), plus a read-only MCP tool `list_receipts`. CI now also runs `test_fleet`.
+- **Build SHA:** `APP_GIT_SHA` build setting → Info.plist `AppGitSHA`. CI passes `GITHUB_SHA`.
+- **Not run on a device yet.** No numbers exist yet. The first device run produces the baseline for O2–O6.
 
 ### 2026-11-26
 - **Fleet (worker):** added `fleet.py` (pull-based nodes, streaming tasks, artifacts, requeue) and `federated.py` (FedAvg over safetensors), plus 7 MCP fleet tools. 40 worker tests pass. The worker is reachable on the tailnet only, at `:8443`.

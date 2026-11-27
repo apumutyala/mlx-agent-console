@@ -20,6 +20,9 @@ final class AppModel {
         backend: backend, documents: documents,
         trainer: (backend as? MLXBackend).map { FederatedTrainer(backend: $0) },
         onModelChanged: { [unowned self] in self.agent.invalidateConversation() })
+    lazy var bench = BenchCoordinator(
+        backend: backend as? MLXBackend,
+        onModelUnloaded: { [unowned self] in self.agent.invalidateConversation() })
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
@@ -60,6 +63,7 @@ struct RootView: View {
                 DocumentsView(documents: model.documents, batches: model.batches, coordinator: model.batchCoordinator)
             }
             Tab("Jobs", systemImage: "server.rack") { JobsListView() }
+            Tab("Bench", systemImage: "speedometer") { BenchView(coordinator: model.bench) }
             Tab("Settings", systemImage: "gear") { SettingsView() }
         }
         .task { model.node.resumeIfEnabled() }   // "Serve tasks" survives relaunch

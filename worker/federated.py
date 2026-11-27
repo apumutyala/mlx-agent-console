@@ -25,6 +25,7 @@ from pathlib import Path
 
 from fleet import TASK_TERMINAL, Fleet, handle as fleet_handle
 from jobworker import now
+from receipts import ReceiptStore, handle as receipts_handle
 
 ROUND_ID = re.compile(r"^r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 ADAPTER = "adapter.safetensors"
@@ -237,8 +238,11 @@ class Federation:
 def make_router(data_dir: Path, offline_after: float = 75.0):
     fleet = Fleet(data_dir, offline_after=offline_after)
     fed = Federation(fleet, data_dir)
+    receipts = ReceiptStore(data_dir)
 
     def router(method, parts, query, read_json, read_raw):
+        if parts[:1] == ["receipts"]:
+            return receipts_handle(receipts, method, parts, query, read_raw)
         if parts[:1] == ["fed"]:
             try:
                 if parts == ["fed", "rounds"]:
@@ -271,4 +275,5 @@ def make_router(data_dir: Path, offline_after: float = 75.0):
 
     router.fleet = fleet
     router.federation = fed
+    router.receipts = receipts
     return router, fleet
