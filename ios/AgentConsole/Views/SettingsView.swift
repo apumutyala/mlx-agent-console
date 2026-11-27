@@ -35,6 +35,7 @@ struct SettingsView: View {
                         guard let entry = ModelCatalog.entry(id: id) else { return }
                         // New model = new chat; the old weights are released.
                         AppModel.shared.agent.reset()
+                        SpeechService.shared.modelSelected(entry)   // big LLM: free Whisper/Kokoro first
                         Task { await AppModel.shared.backend.switchModel(to: entry) }
                     }
                     LabeledContent("Background GPU", value: BatchCoordinator.backgroundGPUAvailable ? "supported" : "not supported")
@@ -44,6 +45,7 @@ struct SettingsView: View {
                     Text("\(entry.note) One-time download of about \(entry.sizeLabel); switching resets the chat."
                          + (hidden > 0 ? " Larger models need a 16 GB iPad." : ""))
                 }
+                SpeechSettingsSection()
                 MemorySettingsSection(memory: AppModel.shared.memory)
             }
             .navigationTitle("Settings")

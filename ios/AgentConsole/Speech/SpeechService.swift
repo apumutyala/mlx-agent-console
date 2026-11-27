@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Observation
+import UIKit
 import Xybrid
 
 /// On-device speech for the chat: push-to-talk STT (Whisper via Xybrid /
@@ -15,7 +16,11 @@ final class SpeechService {
 
     static let asrModelId = "whisper-tiny-ggml"   // 16 kHz mono in, text out
     static let ttsModelId = "kokoro-82m"          // text in, 24 kHz PCM16 out
-    static let ttsVoice = "af"
+    /// Kokoro v1.0's default voice (`voices.default` of kokoro-82m in the Xybrid
+    /// registry). Voice ids are exact-match; there is no voice called "af".
+    static let defaultVoice = "af_heart"
+    /// Selecting an LLM at least this big (download GB) releases the speech models first.
+    static let largeModelGB = 3.0
 
     enum Phase: Equatable {
         case idle
@@ -27,32 +32,76 @@ final class SpeechService {
         case speaking
     }
 
+    enum FinishReason { case user, limit }
+
     private(set) var phase: Phase = .idle
     private(set) var lastError: String?
+    /// Audio from a recording that couldn't be transcribed or delivered yet
+    /// (download failed, interrupted, agent busy). Kept so the user can retry.
+    private(set) var pendingAudio: [Int16]?
+    /// Voices the loaded Kokoro model reports (empty until it has loaded once).
+    private(set) var voices: [XybridVoiceInfo] = []
+    /// Persisted TTS voice; checked against the model's catalog before each reply.
+    var voiceId: String = UserDefaults.standard.string(forKey: "speech.voice") ?? SpeechService.defaultVoice {
+        didSet { UserDefaults.standard.set(voiceId, forKey: "speech.voice") }
+    }
     /// Read assistant replies aloud. Persisted.
     var speakReplies: Bool = UserDefaults.standard.bool(forKey: "speech.speakReplies") {
         didSet {
             UserDefaults.standard.set(speakReplies, forKey: "speech.speakReplies")
-            if !speakReplies { stopSpeaking() }
+            if !speakReplies { stopSpeaking(cancelLoad: true) }
         }
     }
+    /// Receives finished transcripts. Set by the mic button; auto-stops (time
+    /// limit) deliver through it too.
+    var onTranscript: ((String) -> Void)?
+    /// True while the agent is running a turn (kept by `speechReadsReplies`):
+    /// a transcript can't be sent then, so it is held instead of dropped.
+    var hostIsBusy = false
 
     var isRecording: Bool { phase == .recording }
-    var isBusy: Bool {
+    /// Model being downloaded or loaded, if any.
+    var loadingModel: String? {
         switch phase {
-        case .idle, .speaking: return false
-        default: return true
+        case .downloading(let m, _), .loading(let m): return m
+        default: return nil
         }
     }
+    /// Speech-to-text work in progress (the mic is unavailable). A Kokoro
+    /// download does not block the mic.
+    var isBusy: Bool { isTranscribing || phase == .transcribing || loadingModel == Self.asrModelId }
 
     private var asr: XybridModel?
     private var tts: XybridModel?
+    /// In-flight loads, shared by every caller so a model is never loaded twice at once.
+    private var loads: [String: (token: UUID, task: Task<XybridModel, Error>)] = [:]
+    private var isTranscribing = false
     private let recorder = MicRecorder()
     private var speakTask: Task<Void, Never>?
     private var player: AVAudioPlayer?
     private let playerDelegate = PlayerDelegate()
+    private var observers: [NSObjectProtocol] = []
 
-    private init() {}
+    private init() {
+        recorder.onLimitReached = {
+            Task { @MainActor in await SpeechService.shared.finishRecording(reason: .limit) }
+        }
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { n in
+            let raw = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+            Task { @MainActor in SpeechService.shared.handleInterruption(AVAudioSession.InterruptionType(rawValue: raw)) }
+        })
+        observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { n in
+            let raw = (n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+            Task { @MainActor in SpeechService.shared.handleRouteChange(AVAudioSession.RouteChangeReason(rawValue: raw)) }
+        })
+        observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: recorder.engine, queue: .main) { _ in
+            Task { @MainActor in SpeechService.shared.handleEngineConfigurationChange() }
+        })
+        observers.append(nc.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in SpeechService.shared.releaseModels() }
+        })
+    }
 
     // MARK: - Model loading
 
@@ -61,81 +110,227 @@ final class SpeechService {
         !((try? Xybrid.hasCachedModelData(id)) ?? false)
     }
 
+    /// The loaded model, or a shared in-flight load of it. Cancelling the caller
+    /// does not cancel the load (another caller may be waiting); `cancelLoad` does.
+    private func model(_ id: String) async throws -> XybridModel {
+        if id == Self.asrModelId, let asr { return asr }
+        if id == Self.ttsModelId, let tts { return tts }
+        if let inFlight = loads[id] { return try await inFlight.task.value }
+        let token = UUID()
+        let task = Task<XybridModel, Error> { @MainActor in
+            defer {
+                if self.loads[id]?.token == token { self.loads[id] = nil }
+                self.endLoadingPhase(id)
+            }
+            let m = try await self.loadModel(id)
+            if id == Self.asrModelId {
+                self.asr = m
+            } else {
+                self.tts = m
+                self.voices = m.voices()
+            }
+            return m
+        }
+        loads[id] = (token, task)
+        return try await task.value
+    }
+
+    private func cancelLoad(_ id: String) {
+        loads[id]?.task.cancel()
+        loads[id] = nil
+        endLoadingPhase(id)
+    }
+
     private func loadModel(_ id: String) async throws -> XybridModel {
         // Opt out of Xybrid's client telemetry header before the SDK starts (privacy default).
         setenv("XYBRID_TELEMETRY_OPTOUT", "1", 1)
         Xybrid.initialize()   // no apiKey: fully on-device; idempotent
+        Xybrid.setAutoRelease(true)   // under memory pressure, evict idle models before loading
         let loader = Xybrid.model(id)
         if needsDownload(id), let download = loader.download() {
-            phase = .downloading(model: id, progress: 0)
-            for await status in download.progress() {
-                phase = .downloading(model: id, progress: Double(status.progress))
-                if status.state == .failed {
-                    throw SpeechError.downloadFailed(id)
+            showLoading(.downloading(model: id, progress: 0))
+            try await withTaskCancellationHandler {
+                for await status in download.progress() {
+                    showLoading(.downloading(model: id, progress: Double(status.progress)))
+                    if status.state == .failed { throw SpeechError.downloadFailed(id, download.error()) }
+                    if status.state == .cancelled { throw CancellationError() }
+                    if status.state != .downloading { break }
                 }
-                if status.state != .downloading { break }
+            } onCancel: {
+                download.cancel()   // ending progress() only unsubscribes; this stops the transfer
             }
+            try Task.checkCancellation()
         }
-        phase = .loading(model: id)
+        showLoading(.loading(model: id))
         return try await loader.load()
     }
 
-    private func asrModel() async throws -> XybridModel {
-        if let asr { return asr }
-        let m = try await loadModel(Self.asrModelId)
-        asr = m
-        return m
+    /// Shows download/load progress unless the UI is in a recording or speaking phase.
+    private func showLoading(_ p: Phase) {
+        switch phase {
+        case .idle, .downloading, .loading: phase = p
+        default: break
+        }
     }
 
-    private func ttsModel() async throws -> XybridModel {
-        if let tts { return tts }
-        let m = try await loadModel(Self.ttsModelId)
-        tts = m
-        return m
+    private func endLoadingPhase(_ id: String) {
+        if loadingModel == id {
+            phase = .idle
+            deactivateSessionIfIdle()
+        }
+    }
+
+    /// Frees Whisper and Kokoro (memory warning, or a large LLM was selected).
+    /// Released models reload from the on-disk cache on next use; runs in flight are skipped.
+    func releaseModels() {
+        Xybrid.releaseMemory()
+        if !isTranscribing && !isRecording { asr = nil }
+        if speakTask == nil { tts = nil }
+    }
+
+    /// Settings hook: frees the speech models before a big LLM loads.
+    func modelSelected(_ entry: ModelCatalog.Entry) {
+        if entry.downloadGB >= Self.largeModelGB { releaseModels() }
+    }
+
+    /// Loads Kokoro so its voice list can be shown (downloads on first use).
+    func loadVoices() {
+        Task {
+            do { _ = try await self.model(Self.ttsModelId) } catch {
+                if !(error is CancellationError) { self.lastError = "Couldn't load voices: \(error.localizedDescription)" }
+            }
+        }
     }
 
     // MARK: - Push-to-talk STT
 
     /// Starts capturing the microphone. Any speech playback stops first.
     func startRecording() async {
+        guard !isRecording, !isBusy else { return }
         stopSpeaking()
         lastError = nil
         guard await AVAudioApplication.requestRecordPermission() else {
             lastError = "Microphone access is off. Enable it in Settings > Privacy > Microphone."
             return
         }
+        guard !isRecording, !isBusy else { return }   // state may have changed during the prompt
+        stopSpeaking()
+        pendingAudio = nil   // a new recording replaces an unsent one
         do {
             try Self.configureSession()
             try recorder.start()
             phase = .recording
+            prefetchASR()
         } catch {
+            _ = recorder.stop()
             lastError = "Couldn't start recording: \(error.localizedDescription)"
             phase = .idle
+            deactivateSessionIfIdle()
         }
     }
 
-    /// Stops capturing and returns the transcript ("" if nothing was heard).
-    func stopRecordingAndTranscribe() async -> String {
+    /// Fetch Whisper while the user talks, so a first-use download overlaps the recording.
+    private func prefetchASR() {
+        guard asr == nil, loads[Self.asrModelId] == nil else { return }
+        Task { _ = try? await self.model(Self.asrModelId) }
+    }
+
+    /// Stops capturing, transcribes, and hands the transcript to `onTranscript`.
+    /// If transcription fails the audio is kept in `pendingAudio` for a retry.
+    func finishRecording(reason: FinishReason = .user) async {
+        guard isRecording else { return }
         let pcm = recorder.stop()
-        guard !pcm.isEmpty else { phase = .idle; return "" }
+        phase = .idle
+        guard !pcm.isEmpty else { deactivateSessionIfIdle(); return }
+        if reason == .limit {
+            lastError = "Reached the \(MicRecorder.maxSeconds / 60)-minute limit, so recording stopped and was sent."
+        }
+        await transcribe(pcm)
+    }
+
+    /// Transcribes the kept recording again (after a failed download, an interruption…).
+    func retryTranscription() async {
+        guard let pcm = pendingAudio, !isRecording, !isBusy else { return }
+        lastError = nil
+        await transcribe(pcm)
+    }
+
+    func discardPendingAudio() {
+        pendingAudio = nil
+        lastError = nil
+    }
+
+    private func transcribe(_ pcm: [Int16]) async {
+        pendingAudio = pcm   // kept until the transcript is delivered
+        isTranscribing = true
+        defer { isTranscribing = false }
         do {
-            let model = try await asrModel()
+            let whisper = try await self.model(Self.asrModelId)
             phase = .transcribing
             let wav = WAV.encode(pcm16: pcm, sampleRate: MicRecorder.sampleRate)
-            let result = try await model.runAsync(
+            let result = try await whisper.runAsync(
                 envelope: XybridEnvelope.audio(pcmData: wav, sampleRate: UInt32(MicRecorder.sampleRate), channels: 1))
-            phase = .idle
-            return (result.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if phase == .transcribing { phase = .idle }
+            deactivateSessionIfIdle()
+            let text = (result.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                pendingAudio = nil
+                lastError = "No speech was recognized."
+                return
+            }
+            guard !hostIsBusy, let deliver = onTranscript else {
+                lastError = "The agent is busy, so the recording was kept. Tap Send when the reply finishes."
+                return
+            }
+            pendingAudio = nil
+            deliver(text)
         } catch {
-            lastError = "Transcription failed: \(error.localizedDescription)"
-            phase = .idle
-            return ""
+            if phase == .transcribing { phase = .idle }
+            lastError = "Transcription failed: \(error.localizedDescription) The recording was kept; tap Retry."
+            deactivateSessionIfIdle()
         }
+    }
+
+    /// Stops capture without transcribing, keeping the audio for Send/Discard.
+    func suspendRecording(_ message: String) {
+        guard isRecording else { return }
+        let pcm = recorder.stop()
+        phase = .idle
+        if !pcm.isEmpty { pendingAudio = pcm }
+        lastError = pcm.isEmpty ? nil : message
+        deactivateSessionIfIdle()
     }
 
     func cancelRecording() {
         _ = recorder.stop()
         if phase == .recording { phase = .idle }
+        deactivateSessionIfIdle()
+    }
+
+    // MARK: - Audio session events
+
+    private func handleInterruption(_ type: AVAudioSession.InterruptionType?) {
+        guard type == .began else { return }
+        // The system paused our player without a delegate callback; end the read-aloud cleanly.
+        stopSpeaking()
+        suspendRecording("Recording was interrupted. Your audio was kept: tap Send or Discard.")
+    }
+
+    private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason?) {
+        // Headphones unplugged mid-reply: stop rather than continue on the speaker.
+        if reason == .oldDeviceUnavailable, phase == .speaking || phase == .synthesizing {
+            stopSpeaking()
+        }
+    }
+
+    /// The engine stops itself when the input device changes (headset, USB mic).
+    private func handleEngineConfigurationChange() {
+        guard isRecording else { return }
+        do {
+            try recorder.restart()
+        } catch {
+            suspendRecording("The microphone changed and recording couldn't continue. Your audio was kept: tap Send or Discard.")
+        }
     }
 
     // MARK: - TTS
@@ -147,19 +342,23 @@ final class SpeechService {
     }
 
     func speak(_ text: String) {
+        // Never take the audio session away from a live recording or transcription.
+        guard !isRecording, !isBusy else { return }
         stopSpeaking()
         let chunks = Self.chunks(of: Self.speakable(text))
         guard !chunks.isEmpty else { return }
-        speakTask = Task { [weak self] in
-            guard let self else { return }
+        speakTask = Task { @MainActor in
             do {
-                let model = try await self.ttsModel()
+                let kokoro = try await self.model(Self.ttsModelId)
+                try Task.checkCancellation()
+                guard !self.isRecording, !self.isBusy else { throw CancellationError() }
+                let voice = self.resolvedVoice(kokoro)
                 try Self.configureSession()
                 for chunk in chunks {
                     try Task.checkCancellation()
                     self.phase = .synthesizing
-                    let result = try await model.runAsync(
-                        envelope: XybridEnvelope.text(text: chunk, voiceId: Self.ttsVoice, speed: 1.0))
+                    let result = try await kokoro.runAsync(
+                        envelope: XybridEnvelope.text(text: chunk, voiceId: voice, speed: 1.0))
                     try Task.checkCancellation()
                     guard let audio = result.audioBytes, !audio.isEmpty else { continue }
                     self.phase = .speaking
@@ -169,17 +368,34 @@ final class SpeechService {
             } catch {
                 if !Task.isCancelled { self.lastError = "Speech failed: \(error.localizedDescription)" }
             }
-            if !Task.isCancelled { self.phase = .idle }
+            if !Task.isCancelled {
+                if self.phase == .speaking || self.phase == .synthesizing { self.phase = .idle }
+                self.speakTask = nil
+                self.deactivateSessionIfIdle()
+            }
         }
     }
 
-    func stopSpeaking() {
+    /// The chosen voice if the model has it, else the model's default (persisted).
+    /// `nil` lets the SDK pick the model default.
+    private func resolvedVoice(_ model: XybridModel) -> String? {
+        if model.voice(voiceId: voiceId) != nil { return voiceId }
+        guard let fallback = model.defaultVoice()?.id else { return nil }
+        voiceId = fallback
+        return fallback
+    }
+
+    /// Stops playback. `cancelLoad` also abandons a Kokoro download/load in
+    /// flight (the speaker toggle was turned off).
+    func stopSpeaking(cancelLoad: Bool = false) {
         speakTask?.cancel()
         speakTask = nil
         player?.stop()
         player = nil
         playerDelegate.finish()
         if phase == .speaking || phase == .synthesizing { phase = .idle }
+        if cancelLoad { self.cancelLoad(Self.ttsModelId) }
+        deactivateSessionIfIdle()
     }
 
     private func play(_ wav: Data) async throws {
@@ -206,6 +422,13 @@ final class SpeechService {
         let s = AVAudioSession.sharedInstance()
         try s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
         try s.setActive(true)
+    }
+
+    /// Hand the audio back to other apps (music resumes) once nothing is recording or playing.
+    private func deactivateSessionIfIdle() {
+        guard !isRecording, player == nil, speakTask == nil,
+              phase != .speaking, phase != .synthesizing else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// Kokoro returns raw PCM16 (24 kHz mono); wrap it so AVAudioPlayer can read it.
@@ -247,10 +470,11 @@ final class SpeechService {
 }
 
 enum SpeechError: LocalizedError {
-    case downloadFailed(String)
+    case downloadFailed(String, String?)
     var errorDescription: String? {
         switch self {
-        case .downloadFailed(let id): return "Downloading \(id) failed. Check your network connection."
+        case .downloadFailed(let id, let detail):
+            return "Downloading \(id) failed\(detail.map { " (\($0))" } ?? ""). Check your network connection."
         }
     }
 }
@@ -274,14 +498,32 @@ private final class PlayerDelegate: NSObject, AVAudioPlayerDelegate {
 /// Microphone capture → 16 kHz mono PCM16, accumulated until `stop()`.
 final class MicRecorder: @unchecked Sendable {
     static let sampleRate = 16_000
-    private let engine = AVAudioEngine()
+    static let maxSeconds = 120
+    let engine = AVAudioEngine()
     private let lock = NSLock()
     private var samples: [Int16] = []
     private var running = false
-    private let maxSamples = 16_000 * 120   // 2 minutes cap
+    private var limitReached = false
+    private let maxSamples = MicRecorder.sampleRate * MicRecorder.maxSeconds
+    /// Called once (on the audio thread) when the cap is hit; the owner stops and transcribes.
+    var onLimitReached: (@Sendable () -> Void)?
 
     func start() throws {
-        lock.lock(); samples = []; lock.unlock()
+        lock.lock(); samples = []; limitReached = false; lock.unlock()
+        try installTapAndStart()
+    }
+
+    /// After an engine configuration change (input device changed) the engine
+    /// has stopped itself: re-tap with the new input format, keeping what was captured.
+    func restart() throws {
+        guard running else { return }
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        running = false
+        try installTapAndStart()
+    }
+
+    private func installTapAndStart() throws {
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0,
@@ -313,9 +555,14 @@ final class MicRecorder: @unchecked Sendable {
         }
         guard error == nil, let ch = out.int16ChannelData, out.frameLength > 0 else { return }
         let chunk = UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength))
+        var hitLimit = false
         lock.lock()
-        if samples.count < maxSamples { samples.append(contentsOf: chunk) }
+        if !limitReached {
+            samples.append(contentsOf: chunk.prefix(maxSamples - samples.count))
+            if samples.count >= maxSamples { limitReached = true; hitLimit = true }
+        }
         lock.unlock()
+        if hitLimit { onLimitReached?() }
     }
 
     /// Stops capture and returns everything recorded.

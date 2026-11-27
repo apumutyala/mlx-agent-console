@@ -36,7 +36,8 @@ struct ChatView: View {
                         Button("Send", systemImage: "arrow.up.circle.fill") {
                             agent.send(draft); draft = ""
                         }
-                        .disabled(draft.isEmpty)
+                        // Not while the mic is live or a transcript is pending (it would be dropped).
+                        .disabled(draft.isEmpty || SpeechService.shared.isRecording)  // a transcript that finishes while a typed turn runs is held (hostIsBusy), not dropped
                     }
                 }
                 .labelStyle(.iconOnly)
