@@ -22,7 +22,12 @@ jobs:
         working-directory: worker
         run: |
           pip install mcp
-          python -m unittest -v test_jobworker test_mcp_bridge
+          python -m unittest -v test_jobworker test_mcp_bridge test_models
+      - name: Expert repack tests
+        working-directory: tools
+        run: |
+          pip install numpy
+          python -m unittest -v test_expert_repack
 
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.

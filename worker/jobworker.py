@@ -13,6 +13,7 @@ API (all routes require `Authorization: Bearer <WORKER_TOKEN>`):
     POST /jobs/{id}/cancel
     POST /jobs/{id}/retry              -> new job with the same type/params
     POST /jobs/{id}/approvals/{aid}    {"decision": "approve" | "deny"}
+    GET  /models[/<name>[/<file>]]     read-only model files (with --models-dir; see models.py)
 
 Design rules:
   * Jobs are named types from a config file. There is no raw-shell endpoint.
@@ -43,6 +44,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from models import parse_range  # single `Range: bytes=a-b` on file responses (resumable downloads)
 
 IS_WINDOWS = os.name == "nt"
 APPROVAL_PREFIX = "::approval::"
@@ -420,13 +423,28 @@ def make_handler(worker: Worker, token: str, router=None):
 
         def _send_file(self, path: Path) -> None:
             size = path.stat().st_size
-            self.send_response(200)
+            rng = parse_range(self.headers.get("Range"), size)
+            if rng == "invalid":
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            start, end = rng if rng else (0, size - 1)
+            length = end - start + 1 if size else 0
+            self.send_response(206 if rng else 200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            if rng:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
             with path.open("rb") as f:
-                while chunk := f.read(1 << 20):
+                f.seek(start)
+                left = length
+                while left > 0 and (chunk := f.read(min(1 << 20, left))):
                     self.wfile.write(chunk)
+                    left -= len(chunk)
 
         def _route(self, method: str) -> bool:
             if router is None:
@@ -544,6 +562,8 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address; expose via Tailscale/VPN or a TLS proxy, not raw internet")
     ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--models-dir", type=Path, default=os.environ.get("WORKER_MODELS_DIR"),
+                    help="serve streamed model builds read-only at GET /models/<name>/<file>")
     args = ap.parse_args()
     token = os.environ.get("WORKER_TOKEN", "")
     if len(token) < 24:
@@ -551,6 +571,9 @@ def main() -> None:
     worker = Worker(args.data, load_job_types(args.config))
     from federated import make_router  # compute fleet + federated rounds
     router, fleet = make_router(args.data)
+    if args.models_dir:
+        from models import chain, make_models_router
+        router = chain(make_models_router(Path(args.models_dir)), router)
     server = serve(worker, token, args.host, args.port, router)
     print(f"jobworker listening on http://{args.host}:{args.port} "
           f"({len(worker.job_types)} job types, {len(worker.jobs)} persisted jobs, "
