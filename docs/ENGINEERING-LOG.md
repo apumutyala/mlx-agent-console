@@ -25,7 +25,9 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `liquid-models` | LFM3 default, model catalog, native tool calling | `fleet` | merged into `integration` (CI green 45949641772) |
 | `ios-node` | iPad compute node, federated LoRA trainer, GPU gate | `fleet` | merged into `integration` (CI green 45949683774) |
 | `xybrid-speech` | Xybrid Whisper STT + Kokoro TTS | `fleet` | merged into `integration` (CI green 45948595221) |
-| `inkling2` | Inkling 2 Mini via vendored mlx-swift-lm PR #821 + fixes | `liquid-models` | in progress |
+| `inkling2` | Inkling 2 Mini via vendored mlx-swift-lm PR #821 + Fix A | `integration` | PR #2, merged into `integration-next` |
+| `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
+| `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
 
 **Rules for agents:**
@@ -140,6 +142,25 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
+### 2026-11-27: `integration-next` — merged #7 + #2 on top of #6: unified load path
+- **What:** `integration-next` = `integration` (with #6 `fix-node`) + PR #7 `bench` + PR #2 `inkling2`, merged in that order. All three PRs' behaviours are kept; the decisions made in conflict resolution are below.
+- **One load path (`MLXBackend.load`):**
+  1. **Inline in the caller (#6).** The load runs in a task that the caller awaits inside `withTaskCancellationHandler`. Cancelling the caller (pause, Serve off, chat Stop) cancels it, and the caller returns only after the load has really ended, so its `GPUGate` hold outlasts any weight read. There is no unstructured single-flight task that outlives its caller. `checkCancellation()` runs after the load, and a published container is never replaced.
+  2. **Switch-cancel + draining (#2).** `reconcileSelection` cancels every running load when the wanted entry changes (that stops a download; a weight read runs to completion). The next load waits for every superseded load to finish, which drops the superseded task and its discarded container, then calls `MLX.Memory.clearCache()`, and only then runs the memory check and allocates. Because every caller holds the gate, this normally costs nothing; it keeps an ungated caller safe too.
+  3. **Join instead of duplicate (#2).** A second caller for the same epoch joins the running load. It gets progress through `LoadProgressFanout`, and late joiners get the last value. It also gets that load's error. If the joined load was only cancelled (its caller went away), the joiner starts its own load. The join decision is made under the lock that installs the container.
+  4. **Memory gate and VLM routing (#2), unchanged.** These are `MemoryBudget.fit(includingHeld: false)` with the explicit refusal message, `.vlm` entries going through `loadLarge`, the per-load breadcrumb token, and the soft `memoryLimit` and load report.
+  5. **Benchmark mode (#7).** `wantedEntry` is the benchmark target while one runs. `reconcileSelection(force:)` drives `beginBenchmark` / `dropBenchmarkModel` / `endBenchmark`, so benchmarks get the same draining, gate and VLM loader.
+- **`benchmarkParameters(for:)` now calls `applyMemorySettings`**, as #7 row 4 asked. Benchmarks therefore decode with chat's prefill step and `.remainder` chunking (Inkling).
+- **BenchmarkRunner skips through `MemoryBudget`.** Before loading, it records a `skipped` receipt with `MemoryBudget`'s refusal text when the load gate would refuse. This honours "Ignore memory check". Bench's own `downloadGB + headroom` skip is kept after it.
+- **`MLXConversation`** combines #2's context budget (`admit`/`account`, `ContextFull`) with #6's `relay` + `synchronize()`.
+- **`GPUGate.acquire` is `try await` everywhere.** `BenchCoordinator` now uses `do { try await … } catch { finish(); return }`, so a cancel while queued releases nothing. NodeService's `bench` kind runs inside #6's gated `execute` (it is a new case in the switch), so a deferred adapter restore still keeps the gate.
+- **Heartbeat `kinds`:** `train_lora` only when `canTrain` (#6, opt-in), and `bench` whenever the backend is MLX (#7).
+- **`NodeError`:** #6's `trainingOff` / `documentsOff` / `badInitAdapter` and #7's `cannotBench` are all kept.
+- **`FederatedTrainer`:** #6's `convertedContainer()` / `snapshot()` / `resetToBase()` now use #7's weak `Applied.container` with `===`, so a reused address can't match after a benchmark or a switch. `ObjectIdentifier` is gone.
+- **ChatView:** #6's throwing gated load with #7's comment, plus #2's `loadError` display.
+- **`mlxCacheLimit`** (#7's static, which receipts record) is what `performLoad` sets. `DrainBox` and `inflight` from #2 are replaced by `ActiveLoad`/`LoadSignal`.
+- **Status:** compiled in CI only; nothing has run on a device.
+
 ### 2026-11-27: `bench` review fixes (PR #7: 11 confirmed findings) and workload set `w2`
 - **Foreground only:**
   - The idle timer is disabled while a run is going.
@@ -156,6 +177,12 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
   - Bodies over 256 KB are refused unread, and the connection is closed (POST as well as PUT).
   - `list_receipts` keeps its untrusted-data note first and keeps the output under the text budget as valid JSON.
 - **`w2`:** an untimed warm-up decode at each workload's own prompt length, because the first device receipts (w1) showed rep 1 of the 1K and 4K workloads paying Metal compile time, for example LFM3 1K prefill at 864 vs 3341 tok/s. A 10 s idle settle now runs before the footprint baseline. Prompts are unchanged.
+
+### 2026-11-27
+- **Inkling 2 (`inkling2` → PR into `integration`):** vendored aleroot/mlx-swift-lm@5507b3b (PR #821) under `ios/Vendor/mlx-swift-lm` without tests; Fix A (per-layer quantization keys renamed with the `model.` strip) and a DSpark-namespace exclusion. Fix B (mlx-vlm layout remap) deferred: that layout renames/reparametrizes ~30 tensors per layer (`q_scale`/`rel_scale`/`rel_proj`, `controllers.*`, `message_queries`) and LayerFit-2bit mixes gate 3-bit with up 2-bit, so gate/up can't be fused losslessly into `gate_up_proj`; not verifiable without weights.
+  - Tiers (PR layout only): `LocallyInferred/Inkling-2-Mini-MLX-3.1bpw-DWQ` 9.60 GB text weights (default), `roman220220/...-gptq-mlx-jang-small` 10.45 GB, `roman220220/...-gptq-mlx-jang` 12.49 GB. Sizes from safetensors headers, vision excluded.
+  - Runtime gate: needs weights + 1.5 GiB ≤ `os_proc_available_memory()` (+ MLX buffer cache only, not memory a live chat/task may hold); Settings shows the readout, a load report and a killed-load breadcrumb. Compiled only; nothing ran on the iPad.
+  - PR #2 review (9 confirmed) all addressed: superseded weight reads are drained before the next load; single load decision under the container lock with progress fan-out; per-load breadcrumb token; `.remainder` prefill chunking for big models (no ChatSession KV checkpoint copies); no `maxKVSize` for Inkling (global layers would rotate and drop the system prompt), replaced by a per-conversation context budget that errors "start a new chat".
 
 ### 2026-11-26 (night): `fix-node`, review fixes for the iPad compute node
 - **Scope:** the 20 confirmed findings in `docs/review/2026-11-26-ios-node.json`, plus the device half of the HIGH privacy finding in `docs/review/2026-11-26-worker.json` (federated.py:171). The worker Python side is a separate agent's job; no `worker/*.py` edits here.

@@ -99,6 +99,15 @@ struct BenchmarkRunner: Sendable {
         }
         let baseline = ResourceProbe.physFootprint()
         let available = ResourceProbe.availableMemory()
+        // The load path's own gate (resident weights + headroom vs free memory and MLX's
+        // cache, honouring "Ignore memory check") would refuse this load; record a skip with
+        // its explanation instead of a failed load.
+        let fit = MemoryBudget.fit(entry, includingHeld: false)
+        if case .tooLarge(let needed, let budget) = fit, !fit.allowsLoad {
+            return await finish("skipped", skip: MemoryBudget.LoadError.insufficientMemory(
+                model: entry.displayName, neededBytes: needed, budgetBytes: budget,
+                stillHeldBytes: MLX.Memory.activeMemory).localizedDescription)
+        }
         let need = entry.downloadGB * 1_000_000_000 + Self.headroomBytes
         if need > Double(available) {
             return await finish("skipped", skip: String(

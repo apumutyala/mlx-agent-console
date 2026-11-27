@@ -1,0 +1,2 @@
+# Vendored third-party sources are stored byte-for-byte (no line-ending conversion).
+ios/Vendor/** -text

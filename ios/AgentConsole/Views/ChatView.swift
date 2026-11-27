@@ -5,6 +5,7 @@ struct ChatView: View {
     let backend: any ModelBackend
     @State private var draft = ""
     @State private var loadProgress: Double?
+    @State private var loadError: String?
     /// Re-runs the load task when the model is switched in Settings.
     @AppStorage(ModelCatalog.storageKey) private var selectedModelID = ModelCatalog.defaultEntry.id
 
@@ -22,6 +23,10 @@ struct ChatView: View {
                 }
                 if let p = loadProgress, p < 1 {
                     ProgressView("Loading \(backend.displayName)…", value: p).padding()
+                }
+                if let loadError {
+                    Label(loadError, systemImage: "memorychip")
+                        .font(.footnote).foregroundStyle(.orange).padding(.horizontal)
                 }
                 SpeechStatusBar()
                 HStack {
@@ -53,13 +58,20 @@ struct ChatView: View {
             }
             .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
+                loadError = nil
                 guard !(await backend.isLoaded) else { return }
                 // Loading goes through the GPU gate like all model work, so it can't race
                 // a fleet task's load, a LoRA conversion or a benchmark (which owns the
                 // GPU and memory; in benchmark mode `load` serves the benchmark entry).
                 do { try await GPUGate.shared.acquire("chat load") } catch { return }
                 loadProgress = 0
-                try? await backend.load { p in Task { @MainActor in loadProgress = p } }
+                do {
+                    try await backend.load { p in Task { @MainActor in loadProgress = p } }
+                } catch is CancellationError {
+                    // superseded by another model switch
+                } catch {
+                    if !Task.isCancelled { loadError = error.localizedDescription }
+                }
                 loadProgress = 1
                 await GPUGate.shared.release()
             }
