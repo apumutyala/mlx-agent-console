@@ -24,6 +24,12 @@ jobs:
           pip install mcp
           python -m unittest -v test_jobworker test_mcp_bridge
 
+      - name: lamq reference decoder tests (numpy)
+        working-directory: ios/tools/lamq
+        run: |
+          pip install numpy
+          python -m unittest -v test_lamq_ref
+
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.
     runs-on: macos-26   # Xcode 26.6 (mlx-swift-lm 3.33 needs Swift 6.3 tools)
@@ -68,6 +74,20 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecated|Sendable)|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" build.log
+
+      # lamq kernels are MLXFast.metalKernel strings the app build never compiles: rebuild the
+      # source MLX generates and compile it (docs/LAMQ-FORMAT-SPEC.md).
+      - name: Compile lamq Metal kernels
+        if: always()
+        run: |
+          MLX=ios/build/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx
+          ARGS=""
+          if [ -f "$MLX/mlx/backend/metal/kernels/utils.h" ]; then
+            ARGS="--mlx-include $MLX"
+          else
+            echo "::warning::mlx checkout not found; compiling with the minimal prelude"
+          fi
+          python3 ios/tools/kernels/check_lamq_metal_kernels.py --out ios/build/lamq-metal --compile $ARGS
 
       - name: Errors summary
         if: failure()
