@@ -147,6 +147,9 @@ final class LocalAgent {
                         .filter { !$0.isEmpty }.joined(separator: "\n")
                 }
                 }
+                // Cancelling the consumer just ends the stream (no error), so a Stop
+                // would otherwise look like a finished reply (and be read aloud).
+                try Task.checkCancellation()
 
                 if let rejection, nativeCall == nil {
                     // The library rolls a rejected turn (and its prompt) out of the
