@@ -40,12 +40,15 @@ struct SettingsView: View {
                         Task { await AppModel.shared.backend.switchModel(to: entry) }
                     }
                     LabeledContent("Background GPU", value: BatchCoordinator.backgroundGPUAvailable ? "supported" : "not supported")
+                    NavigationLink("Downloaded models") { DownloadedModelsView() }
                 } header: { Text("On-device") } footer: {
                     let entry = ModelCatalog.entry(id: selectedModelID) ?? ModelCatalog.selected
-                    let hidden = ModelCatalog.all.count - ModelCatalog.available.count
+                    let hidden = ModelCatalog.pickerEntries.count - ModelCatalog.available.count
                     let suffix: String = hidden > 0 ? " Larger models need a 16 GB iPad." : ""
+                    let engine: String = entry.engine == .xybrid
+                        ? " Runs on the Xybrid engine (llama.cpp), opt-in and experimental; MLX is the default." : ""
                     let message: String = "\(entry.note) One-time download of about \(entry.sizeLabel); "
-                        + "switching resets the chat." + Self.fitNote(entry) + suffix
+                        + "switching resets the chat." + engine + Self.fitNote(entry) + suffix
                     Text(message)
                 }
                 SpeechSettingsSection()
@@ -84,7 +87,7 @@ struct SettingsView: View {
     }
 
     private static func pickerLabel(_ entry: ModelCatalog.Entry) -> String {
-        let base = "\(entry.displayName) · \(entry.sizeLabel)"
+        let base = "\(entry.displayName) · \(entry.engineLabel) · \(entry.sizeLabel)"
         if case .tooLarge = MemoryBudget.fit(entry) { return base + " · too large" }
         return base
     }

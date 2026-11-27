@@ -402,6 +402,15 @@ class FleetTests(unittest.TestCase):
         self.assertEqual((b["name"], b["duplicate"]), (a["name"], True))
         self.assertEqual(len(self.c.call("GET", "/receipts")[1]["receipts"]), 1)
 
+    def test_receipt_summary_carries_engine_ab_fields(self):
+        import receipts
+        r = {**self.receipt(), "engine": "xybrid", "ab_step": "A6", "jetsam_suspected": True,
+             "status": "killed", "identity": {"bundle_identifier": "x"}}
+        s = receipts.summarize("n.json", r)
+        self.assertEqual((s["engine"], s["ab_step"], s["jetsam_suspected"], s["status"]),
+                         ("xybrid", "A6", True, "killed"))
+        self.assertNotIn("engine", receipts.summarize("m.json", self.receipt()))   # old receipts unchanged
+
     def test_receipts_validation(self):
         good = json.dumps(self.receipt())
         bad = [b"not json", b"[1, 2]", json.dumps({"schema": 2}).encode(),

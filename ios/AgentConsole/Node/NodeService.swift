@@ -185,7 +185,7 @@ final class NodeService {
         let device = UIDevice.current
         var kinds = ["generate"]
         if canTrain { kinds.append("train_lora") }
-        if backend is MLXBackend { kinds.append("bench") }
+        if backend.mlxBackend != nil { kinds.append("bench") }
         return NodeInfo(
             name: device.name, kind: "ipad",
             capabilities: .init(kinds: kinds, model: backend.displayName,
@@ -468,7 +468,7 @@ final class NodeService {
         if buffer.cancelRequested { throw CancellationError() }
         let seconds = Date().timeIntervalSince(start)
         var tokens = chunks
-        if let mlx = backend as? MLXBackend, let n = await mlx.tokenCount(of: reasoning + output) { tokens = n }
+        if let mlx = backend.mlxBackend, let n = await mlx.tokenCount(of: reasoning + output) { tokens = n }
         let tps = seconds > 0 ? Double(tokens) / seconds : 0
         lastTokensPerSecond = tps
         return TaskResult(status: "succeeded", output: output, error: nil,
@@ -496,21 +496,27 @@ final class NodeService {
     /// model and completes with the schema-v1 receipt JSON as output. The
     /// receipt is also saved on the iPad and posted to the worker's /receipts.
     private func runBench(_ data: Data, buffer: TaskEventBuffer) async throws -> TaskResult {
-        guard let mlx = backend as? MLXBackend else { throw NodeError.cannotBench }
+        guard let mlx = backend.mlxBackend else { throw NodeError.cannotBench }
         let p = try FleetClient.decodeTask(data, payload: BenchPayload.self).payload
         let entry: ModelCatalog.Entry
         if let id = p.modelId {
-            guard let e = ModelCatalog.entry(id: id) else {
+            guard let e = ModelCatalog.entry(id: id), e.engine == .mlx else {   // fleet bench = MLX runner
                 throw BenchError.unknownModel(id, known: ModelCatalog.all.map(\.id))
             }
             entry = e
         } else {
-            entry = ModelCatalog.selected
+            // The chat selection may be a Xybrid entry; the fleet bench runs the MLX runner only.
+            let selected = ModelCatalog.selected
+            guard selected.engine == .mlx else {
+                throw BenchError.unknownModel(selected.id, known: ModelCatalog.all.map(\.id))
+            }
+            entry = selected
         }
         _ = try BenchWorkloads.workloads(ids: p.workloadIds)   // fail fast on an unknown id
         status = "Benchmarking \(entry.displayName)"
         onModelChanged()   // the runner unloads the chat model
         modelWasUnloadedByBenchmark()
+        await (backend as? EngineRouter)?.releaseXybrid()   // only one engine holds weights
         let receipt = await BenchmarkRunner(backend: mlx).run(
             entry: entry, workloadIDs: p.workloadIds,
             repetitions: p.repetitions ?? BenchmarkRunner.defaultRepetitions,

@@ -153,8 +153,9 @@ final class LocalAgent {
     private func instructions(tools: ToolRegistry, firstMessage: String) async -> String {
         let files = await documents.all().map { "- \($0.id): \($0.name)" }.joined(separator: "\n")
         let device = UIDevice.current.model   // "iPad" / "iPhone"
+        let engine = ModelCatalog.selected.engine == .xybrid ? "llama.cpp (Xybrid)" : "MLX"
         let base = """
-        You are Agent Console's on-device model (\(backend.displayName)), running locally on the user's \(device) via MLX. \
+        You are Agent Console's on-device model (\(backend.displayName)), running locally on the user's \(device) via \(engine). \
         Nothing leaves the device unless a tool sends it, and worker jobs always need the user's approval.
         Be concise: answer in a few sentences or a short list, no preamble.
         You have these tools; call one only when the request needs it, otherwise just answer:

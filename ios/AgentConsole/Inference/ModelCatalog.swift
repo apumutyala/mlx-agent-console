@@ -46,10 +46,29 @@ enum ModelCatalog {
         /// downloaded too, and MLXVLM's patch D loads it (docs/LAMQ-FORMAT-SPEC.md).
         var lamqRevision: String? = nil
 
+        /// Inference engine. `.xybrid` entries run on Xybrid's llama.cpp (Metal) through
+        /// `XybridLLMBackend`; everything else is MLX.
+        var engine: Engine = .mlx
+        /// Where an `.xybrid` entry's weights come from (nil for MLX entries).
+        var xybridSource: XybridSource? = nil
+
+        /// "MLX" / "Xybrid", shown next to the model in the picker.
+        var engineLabel: String { engine == .mlx ? "MLX" : "Xybrid" }
+
         var sizeLabel: String {
             downloadGB < 1 ? "\(Int((downloadGB * 1000).rounded())) MB" : String(format: "%.1f GB", downloadGB)
         }
         var isSupportedOnThisDevice: Bool { ModelCatalog.deviceMemoryGB >= minimumMemoryGB }
+    }
+
+    enum Engine: String, Hashable, Sendable, Codable { case mlx, xybrid }
+
+    enum XybridSource: Hashable, Sendable {
+        /// A Xybrid registry model id (downloaded into the SDK's cache, Application Support/Xybrid).
+        case registry(String)
+        /// A GGUF file from a Hugging Face repo, downloaded into
+        /// `ModelStore.ggufURL(entryID:file:)` and loaded with `ModelLoader.fromModelFile` (no network).
+        case gguf(repo: String, file: String, bytes: Int64)
     }
 
     static let lfm3_1_7b = Entry(
@@ -285,10 +304,56 @@ enum ModelCatalog {
 
     static let all: [Entry] = [lfm3_1_7b, lfm25_1_2b, lfm25_350m, lfm25_8b_a1b, qwen3_1_7b]
         + lfmStreamTiers + inklingTiers
+
+    // MARK: Xybrid engine (llama.cpp + Metal, GGUF) — opt-in, for the on-device A/B vs MLX
+    //
+    // Not in `all`: MLX benchmark runs iterate `all`, and these can't load through MLX. They
+    // are in `pickerEntries` (chat, opt-in) and run in the Bench tab's engine A/B.
+    // Sizes are the exact Hugging Face file sizes (tree API, 2026-11-27).
+
+    static func xybridGGUF(id: String, name: String, repo: String, file: String, bytes: Int64,
+                           note: String) -> Entry {
+        Entry(id: id, displayName: name, repo: repo, downloadGB: Double(bytes) / 1e9, note: note,
+              minimumMemoryGB: 14, thinks: true, temperature: 0.2,
+              engine: .xybrid, xybridSource: .gguf(repo: repo, file: file, bytes: bytes))
+    }
+
+    /// A1: Xybrid registry LFM2.5 1.2B Instruct (Q4_K_M GGUF, LiquidAI/LFM2.5-1.2B-Instruct-GGUF,
+    /// 730,895,168 bytes) against MLX 4-bit `lfm25_1_2b`.
+    static let xyLFM25_1_2b = Entry(
+        id: "xybrid-lfm2.5-1.2b-instruct", displayName: "LFM2.5 1.2B Instruct", repo: "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+        downloadGB: 0.73, note: "Xybrid engine (llama.cpp, Q4_K_M). Experimental; for comparing against MLX.",
+        minimumMemoryGB: 0, thinks: false, temperature: 0.3,
+        engine: .xybrid, xybridSource: .registry("lfm2.5-1.2b-instruct"))
+    /// A2.
+    static let xyLFM25_8b_Q3KXL = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-q3_k_xl", name: "LFM2.5 8B-A1B · UD-Q3_K_XL",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-Q3_K_XL.gguf", bytes: 4_003_114_592,
+        note: "Xybrid engine, 3-bit GGUF (memory-mapped). Experimental.")
+    /// A3.
+    static let xyLFM25_8b_IQ4XS = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-iq4_xs", name: "LFM2.5 8B-A1B · UD-IQ4_XS",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-IQ4_XS.gguf", bytes: 4_264_996_448,
+        note: "Xybrid engine, 4-bit i-quant GGUF (memory-mapped). Experimental.")
+    /// Smallest 8B point (critique C3).
+    static let xyLFM25_8b_IQ3XXS = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-ud-iq3_xxs", name: "LFM2.5 8B-A1B · UD-IQ3_XXS",
+        repo: "unsloth/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-UD-IQ3_XXS.gguf", bytes: 3_272_339_040,
+        note: "Xybrid engine, smallest 8B GGUF (3.27 GB). Experimental.")
+    /// A6/A7 mmap canary: bigger than what MLX can hold resident under the ~5.3 GB limit.
+    static let xyLFM25_8b_Q4_0 = xybridGGUF(
+        id: "xybrid-lfm2.5-8b-a1b-q4_0", name: "LFM2.5 8B-A1B · Q4_0",
+        repo: "LiquidAI/LFM2.5-8B-A1B-GGUF", file: "LFM2.5-8B-A1B-Q4_0.gguf", bytes: 4_844_678_368,
+        note: "Xybrid engine, 4.84 GB GGUF: memory-limit canary, may be killed by iOS. Experimental.")
+
+    static let xybridEntries: [Entry] = [xyLFM25_1_2b, xyLFM25_8b_IQ3XXS, xyLFM25_8b_Q3KXL, xyLFM25_8b_IQ4XS, xyLFM25_8b_Q4_0]
+
+    /// Everything the model picker offers: MLX entries first, then the opt-in Xybrid ones.
+    static var pickerEntries: [Entry] { all + xybridEntries }
     static let defaultEntry = lfm3_1_7b
 
     /// Entries this device can run, in display order.
-    static var available: [Entry] { all.filter(\.isSupportedOnThisDevice) }
+    static var available: [Entry] { pickerEntries.filter(\.isSupportedOnThisDevice) }
 
     /// Physical RAM in GB (a "16 GB" iPad reports slightly under 16).
     static var deviceMemoryGB: Double { Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824 }
@@ -305,5 +370,5 @@ enum ModelCatalog {
         set { UserDefaults.standard.set(newValue.id, forKey: storageKey) }
     }
 
-    static func entry(id: String) -> Entry? { all.first { $0.id == id } }
+    static func entry(id: String) -> Entry? { pickerEntries.first { $0.id == id } }
 }

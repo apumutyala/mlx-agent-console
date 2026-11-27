@@ -95,6 +95,7 @@ final class BenchCoordinator {
     private(set) var uploadStatus: [String: String] = [:]   // receipt file name → result
 
     @ObservationIgnored private let backend: MLXBackend?
+    @ObservationIgnored private let xybrid: XybridLLMBackend?
     @ObservationIgnored private let onModelUnloaded: @MainActor () -> Void
     @ObservationIgnored private let releaseOtherModels: @MainActor () async -> Void
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -104,12 +105,27 @@ final class BenchCoordinator {
     @ObservationIgnored private var backgroundGrace: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var uploading = false
 
-    init(backend: MLXBackend?, onModelUnloaded: @escaping @MainActor () -> Void,
+    init(backend: MLXBackend?, xybrid: XybridLLMBackend? = nil, onModelUnloaded: @escaping @MainActor () -> Void,
          releaseOtherModels: @escaping @MainActor () async -> Void = {}) {
         self.backend = backend
+        self.xybrid = xybrid
         self.onModelUnloaded = onModelUnloaded
         self.releaseOtherModels = releaseOtherModels
+        // A benchmark the previous launch died in (jetsam breadcrumb still set) becomes a
+        // `killed` receipt with `jetsam_suspected: true`.
+        if let crumb = JetsamBreadcrumb.takeKilled() {
+            let receipt = EngineAB.killedReceipt(crumb)
+            _ = try? ReceiptStore.save(receipt)
+            saved = ReceiptStore.all()
+            killedNotice = "The last run (\(crumb.abStep ?? crumb.engine) · \(crumb.displayName)) was killed during "
+                + "“\(crumb.phase)”; saved as a killed receipt (jetsam suspected)."
+        }
     }
+
+    /// Shown once in the Bench tab after a launch that found a killed run.
+    private(set) var killedNotice: String? = nil
+
+    var canRunEngineAB: Bool { backend != nil && xybrid != nil && !isRunning }
 
     var canRun: Bool { backend != nil && !isRunning }
 
@@ -134,6 +150,7 @@ final class BenchCoordinator {
                 return
             }
             onModelUnloaded()   // drop the chat's session so its weights can actually be freed
+            await xybrid?.unload()   // MLX runs measure MLX alone
             let count = entries.count
             for (i, entry) in entries.enumerated() {
                 if flag.isSet || Task.isCancelled { break }
@@ -154,6 +171,66 @@ final class BenchCoordinator {
                 }
                 await store(receipt)
             }
+            await GPUGate.shared.release()
+            finish()
+        }
+    }
+
+    /// Engine A/B (A1–A7): runs `steps` in order, one receipt each, holding the GPU gate.
+    /// MLX steps go through BenchmarkRunner (workload `ab-256`, 5 reps; A5 with force try);
+    /// Xybrid steps through `EngineAB.runXybrid` with MLX's weights dropped first.
+    func runEngineAB(_ steps: [EngineAB.Step]) {
+        guard let backend, let xybrid, !isRunning, !steps.isEmpty else { return }
+        guard UIApplication.shared.applicationState == .active else { return }
+        isRunning = true
+        abortReason = nil
+        killedNotice = nil
+        cancelFlag.reset()
+        idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        let flag = cancelFlag
+        status = "Waiting for the model to be free"
+        task = Task {
+            await releaseOtherModels()
+            do { try await GPUGate.shared.acquire("engine A/B") } catch {
+                finish()
+                return
+            }
+            onModelUnloaded()
+            let count = steps.count
+            for (i, step) in steps.enumerated() {
+                if flag.isSet || Task.isCancelled { break }
+                let report: @Sendable (BenchmarkRunner.Progress) -> Void = { [self] p in
+                    Task { @MainActor in
+                        guard self.isRunning, !flag.isSet else { return }
+                        self.status = "[\(i + 1)/\(count)] \(step.id) · \(p.message)"
+                        self.fraction = (Double(i) + p.fraction) / Double(count)
+                    }
+                }
+                var receipt: BenchReceipt
+                if let entry = step.entry {
+                    if entry.engine == .xybrid {
+                        backend.beginBenchmark(entry)   // MLX drops its weights; nothing MLX loads
+                        receipt = await EngineAB.runXybrid(step, backend: xybrid, progress: report,
+                                                           isCancelled: { flag.isSet })
+                        backend.endBenchmark()
+                    } else {
+                        await xybrid.unload()
+                        let runner = BenchmarkRunner(backend: backend, forceLoad: step.force, abStep: step.id)
+                        receipt = await runner.run(entry: entry, workloadIDs: [EngineAB.workloadID],
+                                                   repetitions: EngineAB.repetitions,
+                                                   progress: report, isCancelled: { flag.isSet })
+                    }
+                } else {
+                    receipt = await EngineAB.notRunnable(step)
+                }
+                if receipt.status == "cancelled", let reason = abortReason {
+                    receipt.status = "aborted"
+                    receipt.error = reason
+                }
+                await store(receipt)
+            }
+            await xybrid.unload()
             await GPUGate.shared.release()
             finish()
         }

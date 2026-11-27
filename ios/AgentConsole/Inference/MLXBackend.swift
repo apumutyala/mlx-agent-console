@@ -82,6 +82,19 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     /// Files of a LookAtMyQuant packed build: the factory's own patterns plus the packed `.npz`
     /// files, which it would not fetch (MLXVLM patch D, docs/LAMQ-FORMAT-SPEC.md).
     static let lamqDownloadPatterns = ["*.npz", "*.safetensors", "*.json", "*.jinja"]
+    /// `configuration(for:)`, pointed at the local snapshot when ModelStore has a complete
+    /// one for the repo at `refs/main` (then the downloader is never called for the
+    /// weights, so the load works offline and never waits on the network). Only the model
+    /// source changes, so registry settings such as `toolCallFormat` are kept.
+    static func storeConfiguration(for entry: ModelCatalog.Entry) -> (ModelConfiguration, local: Bool) {
+        var cfg = configuration(for: entry)
+        if case .id(let repo, revision: let revision) = cfg.id, revision == "main",
+           let snapshot = ModelStore.localSnapshot(repo: repo) {
+            cfg.id = .directory(snapshot)
+            return (cfg, true)
+        }
+        return (cfg, false)
+    }
 
     /// Generation settings that bound memory for big models. The KV cache is deliberately
     /// *not* capped with `maxKVSize`: on Inkling that turns the global-attention layers into
@@ -229,6 +242,8 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
                 stillHeldBytes: MLX.Memory.activeMemory)
         }
 
+        guard target.engine == .mlx else { throw BackendError.wrongEngine(target.displayName) }
+
         // Read by the MoE loaders (Inkling 2, LFM2 MoE) once per load: off unless streamed.
         Inkling2ExpertStreaming.options = Inkling2ExpertStreamingOptions(
             enabled: target.streamed != nil,
@@ -237,11 +252,17 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
         switch target.loader {
         case .llm where target.streamed == nil:
-            return try await #huggingFaceLoadModelContainer(
-                configuration: Self.configuration(for: target),
-                progress: .download { p in progress(p.fractionCompleted) }
-            )
+            // Local-first: a complete snapshot in ModelStore loads with no network call.
+            let (configuration, local) = Self.storeConfiguration(for: target)
+            let loaded = try await loadModelContainer(
+                from: #hubDownloader(ModelStore.hub),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: configuration,
+                progress: .download { p in progress(p.fractionCompleted) })
+            if !local { ModelStore.noteDownloaded(repo: target.repo) }
+            return loaded
         case .llm, .vlm:
+            // Streamed builds (LFM and Inkling) and every VLM-factory model.
             return try await loadLarge(target, epoch: loadEpoch, progress: progress)
         }
     }
@@ -299,22 +320,25 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         } else if let revision = target.lamqRevision {
             // LookAtMyQuant packed build: fetch the pinned snapshot with its .npz files, then
             // load it from the directory (patch D installs the packed layers).
-            let downloader = #hubDownloader()
+            let downloader = #hubDownloader(ModelStore.hub)
             let directory = try await downloader.download(
                 id: target.repo, revision: revision, matching: Self.lamqDownloadPatterns,
                 useLatest: false, progressHandler: { p in progress(0.9 * p.fractionCompleted) })
             try Task.checkCancellation()
             loaded = try await VLMModelFactory.shared.loadContainer(
-                from: #hubDownloader(),
+                from: #hubDownloader(ModelStore.hub),
                 using: #huggingFaceTokenizerLoader(),
                 configuration: ModelConfiguration(directory: directory),
                 progress: handlers)
         } else {
+            // Local-first through ModelStore (Application Support), as for `.llm`.
+            let (configuration, local) = Self.storeConfiguration(for: target)
             loaded = try await VLMModelFactory.shared.loadContainer(
-                from: #hubDownloader(),
+                from: #hubDownloader(ModelStore.hub),
                 using: #huggingFaceTokenizerLoader(),
-                configuration: Self.configuration(for: target),
+                configuration: configuration,
                 progress: handlers)
+            if !local { ModelStore.noteDownloaded(repo: target.repo) }
         }
 
         if isCurrent(loadEpoch) {
@@ -455,7 +479,14 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
     enum BackendError: LocalizedError {
         case notLoaded
-        var errorDescription: String? { "Model not loaded yet." }
+        /// The entry runs on another engine (Xybrid); `EngineRouter` routes it there.
+        case wrongEngine(String)
+        var errorDescription: String? {
+            switch self {
+            case .notLoaded: "Model not loaded yet."
+            case .wrongEngine(let name): "\(name) runs on the Xybrid engine, not MLX."
+            }
+        }
     }
 }
 
