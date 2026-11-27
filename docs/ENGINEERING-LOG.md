@@ -26,6 +26,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `ios-node` | iPad compute node, federated LoRA trainer, GPU gate | `fleet` | merged into `integration` (CI green 45949683774) |
 | `xybrid-speech` | Xybrid Whisper STT + Kokoro TTS | `fleet` | merged into `integration` (CI green 45948595221) |
 | `inkling2` | Inkling 2 Mini via vendored mlx-swift-lm PR #821 + Fix A | `integration` | PR open, CI pending |
+| `inkling-stream` | Inkling SSD expert streaming (repack tool, slot cache, streamed tiers, worker /models) | `inkling2` | PR open, CI green 45956320062 |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
 
 **Rules for agents:**
@@ -47,6 +48,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | Xybrid speech | yes | no | +18 MB IPA; telemetry opted out |
 | QR pairing (`worker/pair.ps1`) | not yet | no | VisionKit scanner |
 | Inkling 2 Mini | in progress | no | see findings below |
+| Inkling expert streaming (O3) | yes | no | free sideload limit ≈5.3 GB → streamed 25%/19% are the only Inkling tiers that fit |
 | Memory harness + document tools | in progress | no | |
 
 ## Findings
@@ -88,7 +90,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 |---|---|---|---|
 | O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | todo |
 | O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | todo; upstream candidate |
-| O3 | Inkling expert streaming / mmap of routed experts | fits 8–12 GB devices, frees RAM | research |
+| O3 | Inkling expert streaming (slot cache + `preadv`, no mmap) | fits the 5.3 GB free-sideload limit | implemented on `inkling-stream`, compiled; device run pending |
 | O4 | KV cache quantization / smaller prefill step on iPad | memory headroom, longer context | todo |
 | O5 | Speculative / MTP heads (DSpark for LFM2, Inkling MTP builds) | decode speed | not in scope for the Trainium work; allowed here, pending a decision |
 | O6 | Our own Inkling quant (REAP + mixed bits + DWQ) on a rented box | quality per GB | plan written |
@@ -102,6 +104,13 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27 (expert streaming)
+- **Inkling SSD expert streaming (`inkling-stream` → PR into `integration`, depends on #2):**
+  - `tools/expert_repack.py` repacks a PR-loadable MLX build into core shards + `experts.bin` (16 KiB-aligned per-expert records) + `experts.json`; byte-exact, streamed, stdlib only; tests pass locally. Plan on the real DWQ header: experts 8.239 GB, core 1.357 GB text (+0.637 GB vision), 64.36 MB per slot across 24 layers.
+  - Vendored patch C: per-layer slot cache inside the expert tensors (decayed-use eviction, in-call protection, remap; identity at 100%), `F_NOCACHE` `preadv` into the MLXArray's own buffer (pointer from `asData(.noCopy)` + a load-time GPU read-back probe; no mlx-swift patch), chunked expert-major prefill, counters, optional JSONL routing trace. `Load.swift` hook skips stacked experts.
+  - App: streamed tiers 19% (24 slots) / 25% (32) / 50% / 100%; resumable download from the worker's new read-only `GET /models/<name>/<file>` (Range); Settings toggles for trace, greedy and exact prefill (3-token steps → all streamed tiers bit-identical, the on-device gate); `BenchMetricsRegistry` `inkling_stream.*` for receipts. `tools/expert_trace_sim.py` replays a trace (decayed/LRU/oracle hit rates).
+  - Budget for the free-sideload limit (~5.3 GB, device receipt): 32 slots ≈ 4.1 GB at 4K context, the largest that fits under 4.6 GB. Compiled only (CI 45956320062); nothing ran on the iPad.
 
 ### 2026-11-27
 - **Inkling 2 (`inkling2` → PR into `integration`):** vendored aleroot/mlx-swift-lm@5507b3b (PR #821) under `ios/Vendor/mlx-swift-lm` without tests; Fix A (per-layer quantization keys renamed with the `model.` strip) and a DSpark-namespace exclusion. Fix B (mlx-vlm layout remap) deferred: that layout renames/reparametrizes ~30 tensors per layer (`q_scale`/`rel_scale`/`rel_proj`, `controllers.*`, `message_queries`) and LayerFit-2bit mixes gate 3-bit with up 2-bit, so gate/up can't be fused losslessly into `gate_up_proj`; not verifiable without weights.
