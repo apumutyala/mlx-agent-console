@@ -14,6 +14,9 @@ packages:
   SwiftTransformers:
     url: https://github.com/huggingface/swift-transformers
     from: 1.3.0
+  Xybrid:                               # on-device STT/TTS only (whisper.cpp + Kokoro/ONNX)
+    url: https://github.com/xybrid-ai/xybrid
+    exactVersion: 0.21.0
 targets:
   AgentConsole:
     type: application
@@ -31,6 +34,8 @@ targets:
         product: HuggingFace
       - package: SwiftTransformers
         product: Tokenizers
+      - package: Xybrid
+        product: Xybrid
     entitlements:
       path: AgentConsole/AgentConsole.entitlements
       properties:
@@ -48,6 +53,7 @@ targets:
            UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).summarize.*
+        NSMicrophoneUsageDescription: Push-to-talk transcribes your voice on device to send to the agent.
         NSLocalNetworkUsageDescription: Connects to your job worker on the local network.
         NSAppTransportSecurity:
           # Allows http:// to IPs and .local names (e.g. a Tailscale 100.x address).
