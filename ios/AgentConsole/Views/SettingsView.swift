@@ -1,9 +1,10 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @State private var url = UserDefaults.standard.string(forKey: "worker.baseURL") ?? "http://100.x.y.z:8787"
+    @State private var url = UserDefaults.standard.string(forKey: "worker.baseURL") ?? "https://<host>.ts.net:8443"
     @State private var token = Keychain.read("worker.token") ?? ""
     @State private var status: String?
+    @State private var scanning = false
     @AppStorage(ModelCatalog.storageKey) private var selectedModelID = ModelCatalog.defaultEntry.id
 
     var body: some View {
@@ -16,16 +17,11 @@ struct SettingsView: View {
                 } header: { Text("Remote worker") } footer: {
                     Text("Reach the worker over Tailscale/VPN or HTTPS. The token is stored in the Keychain.")
                 }
+                Button("Scan pairing code", systemImage: "qrcode.viewfinder") { scanning = true }
+                    .disabled(!PairingScannerView.isAvailable)
                 Button("Save and test") {
                     guard let u = URL(string: url) else { status = "Invalid URL"; return }
-                    let cfg = WorkerConfig(baseURL: u, token: token)
-                    cfg.save()
-                    Task {
-                        do {
-                            let types = try await WorkerClient(config: cfg).jobTypes()
-                            status = "Connected · \(types.count) job types"
-                        } catch { status = error.localizedDescription }
-                    }
+                    saveAndTest(WorkerConfig(baseURL: u, token: token))
                 }
                 if let status { Text(status).font(.footnote) }
                 NodeSettingsSection(node: AppModel.shared.node)
@@ -50,6 +46,31 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .sheet(isPresented: $scanning) {
+                NavigationStack {
+                    PairingScannerView { payload in
+                        url = payload.url.absoluteString
+                        token = payload.token
+                        scanning = false
+                        saveAndTest(WorkerConfig(baseURL: payload.url, token: payload.token))
+                    }
+                    .ignoresSafeArea()
+                    .navigationTitle("Scan the code from pair.ps1")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { scanning = false } } }
+                }
+            }
+        }
+    }
+
+    private func saveAndTest(_ cfg: WorkerConfig) {
+        cfg.save()
+        status = "Testing…"
+        Task {
+            do {
+                let types = try await WorkerClient(config: cfg).jobTypes()
+                status = "Connected · \(types.count) job types"
+            } catch { status = error.localizedDescription }
         }
     }
 }

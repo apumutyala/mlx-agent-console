@@ -65,6 +65,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).summarize.*
         NSMicrophoneUsageDescription: Push-to-talk transcribes your voice on device to send to the agent.
+        NSCameraUsageDescription: Scans the pairing QR code shown by your worker so you do not have to type its token.
         NSLocalNetworkUsageDescription: Connects to your job worker on the local network.
         NSAppTransportSecurity:
           # Allows http:// to IPs and .local names (e.g. a Tailscale 100.x address).

@@ -232,6 +232,8 @@ user-started continued-processing task).
 3. Each device uploads `adapter.safetensors`.
 4. The coordinator averages the adapters, weighted by example count, and publishes the result at `/fed/rounds/{id}/adapter`.
 
+**Pairing the iPad**: on the worker machine run `worker\pair.ps1` (`-Ascii` prints the code in the terminal). It shows a QR code holding the worker URL and token. On the iPad, go to Settings → **Scan pairing code**. The image is deleted when you press Enter.
+
 The iPad reaches the worker over the tailnet only (`tailscale serve --https=8443 http://127.0.0.1:8787`). Only the MCP bridge is on the public Funnel.
 
 **What iOS does not allow:**
