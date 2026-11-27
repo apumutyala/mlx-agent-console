@@ -36,6 +36,7 @@ struct SettingsView: View {
                         guard let entry = ModelCatalog.entry(id: id) else { return }
                         // New model = new chat; the old weights are released.
                         AppModel.shared.agent.reset()
+                        SpeechService.shared.modelSelected(entry)   // big LLM: free Whisper/Kokoro first
                         Task { await AppModel.shared.backend.switchModel(to: entry) }
                     }
                     LabeledContent("Background GPU", value: BatchCoordinator.backgroundGPUAvailable ? "supported" : "not supported")
@@ -47,6 +48,7 @@ struct SettingsView: View {
                         + "switching resets the chat." + Self.fitNote(entry) + suffix
                     Text(message)
                 }
+                SpeechSettingsSection()
                 MemorySettingsSection(memory: AppModel.shared.memory)
                 MemorySection(ignoreMemoryCheck: $ignoreMemoryCheck)
                 if ModelCatalog.deviceMemoryGB >= 14 { LamqSettingsSection() }

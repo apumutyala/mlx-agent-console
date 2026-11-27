@@ -65,16 +65,29 @@ protocol ModelConversation: AnyObject, Sendable {
     func send(_ message: String) -> AsyncThrowingStream<ModelEvent, Error>
     /// Answer the previous reply's tool call(s) with tool-role messages and stream the follow-up.
     func sendToolResults(_ results: [ToolResultMessage]) -> AsyncThrowingStream<ModelEvent, Error>
+    /// Waits until generation started by this conversation has really stopped
+    /// on the model (a cancelled or abandoned stream keeps decoding until its
+    /// runner notices). Await it before releasing `GPUGate`.
+    func synchronize() async
 }
 
 extension ModelConversation {
+    func synchronize() async {}
+
     /// Answer text only (reasoning dropped), for non-chat uses like summaries.
+    /// Always waits for the generation to stop before returning or throwing.
     func complete(_ message: String) async throws -> String {
         var out = ""
-        for try await event in send(message) {
-            try Task.checkCancellation()
-            if case .text(let chunk) = event { out += chunk }
+        do {
+            for try await event in send(message) {
+                try Task.checkCancellation()
+                if case .text(let chunk) = event { out += chunk }
+            }
+        } catch {
+            await synchronize()
+            throw error
         }
+        await synchronize()
         return ThinkSplitter.split(out).answer.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

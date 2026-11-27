@@ -29,7 +29,7 @@ enum LamqSelfCheck {
             try? FileManager.default.removeItem(at: dest)
             try FileManager.default.moveItem(at: tmp, to: dest)
         }
-        await GPUGate.shared.acquire("lamq self-check")
+        try await GPUGate.shared.acquire("lamq self-check")
         progress("Running kernels…")
         let result: InklingLamqSelfCheck.Result
         do {

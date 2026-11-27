@@ -41,7 +41,8 @@ struct ChatView: View {
                         Button("Send", systemImage: "arrow.up.circle.fill") {
                             agent.send(draft); draft = ""
                         }
-                        .disabled(draft.isEmpty)
+                        // Not while the mic is live or a transcript is pending (it would be dropped).
+                        .disabled(draft.isEmpty || SpeechService.shared.isRecording)  // a transcript that finishes while a typed turn runs is held (hostIsBusy), not dropped
                     }
                 }
                 .labelStyle(.iconOnly)
@@ -59,6 +60,10 @@ struct ChatView: View {
             .task(id: selectedModelID) {
                 loadError = nil
                 guard !(await backend.isLoaded) else { return }
+                // Loading goes through the GPU gate like all model work, so it can't race
+                // a fleet task's load, a LoRA conversion or a benchmark (which owns the
+                // GPU and memory; in benchmark mode `load` serves the benchmark entry).
+                do { try await GPUGate.shared.acquire("chat load") } catch { return }
                 loadProgress = 0
                 do {
                     try await backend.load { p in Task { @MainActor in loadProgress = p } }
@@ -68,6 +73,7 @@ struct ChatView: View {
                     if !Task.isCancelled { loadError = error.localizedDescription }
                 }
                 loadProgress = 1
+                await GPUGate.shared.release()
             }
             .alert("Allow this action?",
                    isPresented: Binding(get: { agent.pendingConfirmation != nil }, set: { _ in })) {

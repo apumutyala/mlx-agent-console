@@ -10,17 +10,32 @@ import Tokenizers
 /// The only file that touches MLX. Written against mlx-swift-lm 3.33 plus PR #821
 /// (Inkling 2), vendored under ios/Vendor/mlx-swift-lm. The Hugging Face
 /// downloader/tokenizer come from the MLXHuggingFace macros.
+///
+/// One load path (`load`) serves chat, fleet tasks, LoRA rounds and benchmarks:
+/// - it runs on behalf of the caller's task, so cancelling the caller (pause, Serve
+///   off, chat Stop) cancels the download, and the caller only returns once the load
+///   has really finished (#6);
+/// - a model switch cancels the superseded download, and the next load drains every
+///   superseded weight read (which can't be cancelled) before it clears MLX's cache,
+///   measures memory and allocates (#2);
+/// - the `MemoryBudget` gate refuses models that don't fit, and VLM-factory entries
+///   (Inkling 2) load through `loadLarge` (#2);
+/// - in benchmark mode it serves the benchmark target instead of the selection (#7).
+/// Every caller holds `GPUGate`, which serializes loads; the join/drain bookkeeping
+/// below keeps the path safe even for a caller that doesn't.
 final class MLXBackend: ModelBackend, @unchecked Sendable {
     private var entry: ModelCatalog.Entry
     private var container: ModelContainer?
     /// Bumped on every switch so a load that finishes late can't install a stale model.
     private var epoch = 0
-    /// The load in progress for `epoch`, shared by every caller that asks meanwhile.
-    private var inflight: (epoch: Int, task: Task<ModelContainer, Error>, progress: LoadProgressFanout)?
-    /// Loads a model switch superseded. A weight read can't be cancelled (it runs on a
-    /// dispatch queue), so the next load waits for these before it measures or allocates.
-    private var draining: [Task<ModelContainer, Error>] = []
+    /// Set while a benchmark runs (see Benchmark mode below).
+    private var benchmarkEntry: ModelCatalog.Entry?
+    /// Loads currently running, for the current epoch or superseded ones still draining.
+    private var active: [ActiveLoad] = []
     private let lock = NSLock()
+
+    /// MLX's free-buffer cache limit on iPad; weights dominate memory.
+    static let mlxCacheLimit = 32 * 1024 * 1024
 
     init(entry: ModelCatalog.Entry = ModelCatalog.selected) {
         self.entry = entry
@@ -79,75 +94,113 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         reconcileSelection()
     }
 
-    /// Unload if the persisted selection differs from what's loaded.
-    private func reconcileSelection() {
-        let wanted = ModelCatalog.selected
-        let superseded: Task<ModelContainer, Error>?? = lock.withLock {
-            guard wanted.id != entry.id else { return nil }
-            entry = wanted
-            container = nil   // conversations still holding the old container keep it alive until they end
-            let old = inflight?.task
-            inflight = nil
-            epoch += 1
-            if let old {
-                old.cancel()   // stops a download; a weight read runs to completion
-                draining.append(old)
-            }
-            return .some(old)
-        }
-        guard let superseded else { return }
-        MLX.Memory.clearCache()
-        if let old = superseded {
-            // Drop our reference once it finishes so its (discarded) weights can be freed.
-            Task { [weak self] in
-                _ = try? await old.value
-                self?.lock.withLock { self?.draining.removeAll { $0 == old } }
-                MLX.Memory.clearCache()
-            }
-        }
+    /// The entry the backend should hold: the benchmark target while a benchmark
+    /// runs, otherwise the persisted selection.
+    private var wantedEntry: ModelCatalog.Entry {
+        lock.withLock { benchmarkEntry } ?? ModelCatalog.selected
     }
 
-    private enum LoadPlan {
+    /// Unload if the wanted entry differs from what's loaded (or always, with `force`).
+    /// A load still running for the old entry is cancelled (that stops a download; a
+    /// weight read runs to completion) and drained by the next load.
+    private func reconcileSelection(force: Bool = false) {
+        let wanted = wantedEntry
+        let changed: Bool = lock.withLock {
+            guard force || wanted.id != entry.id else { return false }
+            entry = wanted
+            container = nil   // conversations still holding the old container keep it alive until they end
+            epoch += 1
+            for load in active { load.cancel() }
+            return true
+        }
+        if changed { MLX.Memory.clearCache() }
+    }
+
+    private enum LoadStep {
         case loaded
-        case wait(Task<ModelContainer, Error>, epoch: Int)
+        /// Another task is loading the current entry: wait for it, then re-check.
+        case join(LoadSignal)
+        /// Superseded weight reads are still finishing: wait for them before measuring.
+        case drain([LoadSignal])
+        case start(ActiveLoad, target: ModelCatalog.Entry, epoch: Int)
     }
 
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
-        reconcileSelection()
-        // One load at a time. The decision is made under the same lock that installs the
-        // container, so a caller arriving as a load finishes can't start a duplicate.
-        let plan: LoadPlan = lock.withLock {
-            if container != nil { return .loaded }
-            if let inflight, inflight.epoch == epoch {
-                inflight.progress.add(progress)
-                return .wait(inflight.task, epoch: epoch)
+        var drained = false
+        while true {
+            reconcileSelection()
+            // After reconciling, `entry` is the wanted one (the selection, or a benchmark
+            // target). The decision is made under the lock that installs the container, so
+            // a caller arriving as a load finishes can't start a duplicate.
+            let step: LoadStep = lock.withLock {
+                if container != nil { return .loaded }
+                if let current = active.first(where: { $0.epoch == epoch }) {
+                    current.progress.add(progress)
+                    return .join(current.done)
+                }
+                let stale = active.map(\.done)
+                if !stale.isEmpty { return .drain(stale) }
+                let load = ActiveLoad(epoch: epoch)
+                load.progress.add(progress)
+                active.append(load)
+                return .start(load, target: entry, epoch: epoch)
             }
-            let fanout = LoadProgressFanout()
-            fanout.add(progress)
-            let previous = DrainBox(draining)
-            let target = entry
-            let loadEpoch = epoch
-            let task = Task { () async throws -> ModelContainer in
-                await previous.drain()   // superseded weight reads finish (and free) first
-                MLX.Memory.clearCache()
+            switch step {
+            case .loaded:
+                progress(1)
+                return
+            case .join(let signal):
+                // The joined load's error is ours too, unless it was only cancelled
+                // (its caller went away): then retry, starting our own.
+                if let error = await signal.wait(), !(error is CancellationError) { throw error }
                 try Task.checkCancellation()
-                return try await self.performLoad(target, epoch: loadEpoch) { fanout.send($0) }
+            case .drain(let signals):
+                for signal in signals { _ = await signal.wait() }
+                drained = true
+                try Task.checkCancellation()
+            case .start(let load, target: let target, epoch: let startEpoch):
+                if drained { MLX.Memory.clearCache() }   // the drained loads' discarded weights
+                do {
+                    try await run(load, target: target, epoch: startEpoch)
+                } catch {
+                    finish(load, error: error)
+                    throw error
+                }
+                finish(load, error: nil)
+                try Task.checkCancellation()
+                progress(1)
+                return
             }
-            inflight = (epoch, task, fanout)
-            return .wait(task, epoch: epoch)
         }
-        guard case .wait(let task, let startEpoch) = plan else { progress(1); return }
-        do {
-            let loaded = try await task.value
-            lock.withLock {
-                if epoch == startEpoch, container == nil { container = loaded }
-                if inflight?.epoch == startEpoch { inflight = nil }
-            }
-            progress(1)
-        } catch {
-            lock.withLock { if inflight?.epoch == startEpoch { inflight = nil } }
-            throw error
+    }
+
+    /// Runs one load to completion and installs it if it is still wanted. The load runs
+    /// in a task this caller awaits (cancelling the caller cancels it), and the await only
+    /// returns once the task has ended, so the caller (and its `GPUGate` hold) outlasts any
+    /// weight read. A published container is never replaced.
+    private func run(_ load: ActiveLoad, target: ModelCatalog.Entry, epoch startEpoch: Int) async throws {
+        let task = Task { () async throws -> ModelContainer in
+            try Task.checkCancellation()
+            return try await self.performLoad(target, epoch: startEpoch) { load.progress.send($0) }
         }
+        if !load.attach(task) { task.cancel() }   // superseded before it started
+        let loaded = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        lock.withLock {
+            if epoch == startEpoch, container == nil { container = loaded }
+        }
+    }
+
+    /// Removes a finished load and wakes whoever joined or is draining it. Called after
+    /// `run` returned, so this frame no longer references a discarded container.
+    private func finish(_ load: ActiveLoad, error: Error?) {
+        lock.withLock { active.removeAll { $0 === load } }
+        load.detach()
+        load.done.finish(error)
+        if error != nil || !isCurrent(load.epoch) { MLX.Memory.clearCache() }
     }
 
     private func isCurrent(_ loadEpoch: Int) -> Bool { lock.withLock { epoch == loadEpoch } }
@@ -156,7 +209,7 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
                              progress: @escaping @Sendable (Double) -> Void) async throws -> ModelContainer
     {
         // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-        MLX.Memory.cacheLimit = 32 * 1024 * 1024
+        MLX.Memory.cacheLimit = Self.mlxCacheLimit
 
         // Big models: refuse up front rather than get the app killed mid-load. Only the
         // buffer cache counts as freeable here: weights another task or chat still holds
@@ -227,6 +280,47 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         return loaded
     }
 
+    // MARK: Benchmark mode
+    //
+    // Benchmarks load through `load` above (the one load path), so its draining, VLM
+    // routing and memory budget apply to measured models too. The caller holds GPUGate
+    // for the whole benchmark.
+
+    /// Until `endBenchmark()`, serve `entry` instead of the persisted selection. The
+    /// selection itself is not changed. Drops whatever is loaded (chat model, adapters).
+    func beginBenchmark(_ entry: ModelCatalog.Entry) {
+        lock.withLock { benchmarkEntry = entry }
+        reconcileSelection(force: true)
+    }
+
+    /// Load the benchmark target through `load` and return its container.
+    func loadBenchmarkModel(progress: @escaping @Sendable (Double) -> Void) async throws -> ModelContainer {
+        try await load(progress: progress)
+        guard let c = modelContainer else { throw BackendError.notLoaded }
+        return c
+    }
+
+    /// Drop the benchmark target's weights (before a warm reload). The caller must
+    /// also drop its own reference for the memory to be freed.
+    func dropBenchmarkModel() { reconcileSelection(force: true) }
+
+    /// Leave benchmark mode; the chat model reloads on its next `load`.
+    func endBenchmark() {
+        lock.withLock { benchmarkEntry = nil }
+        reconcileSelection(force: true)
+    }
+
+    /// Generation parameters a benchmark decodes with: the same per-entry settings chat
+    /// uses (prefill step and chunking from `applyMemorySettings`), greedy.
+    static func benchmarkParameters(for entry: ModelCatalog.Entry, maxTokens: Int, seed: UInt64) -> GenerateParameters {
+        var params = GenerateParameters()
+        params.maxTokens = maxTokens
+        params.temperature = 0          // greedy (argmax sampler)
+        params.seed = seed
+        applyMemorySettings(of: entry, to: &params)
+        return params
+    }
+
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {
         let loadedContainer: ModelContainer? = lock.withLock { self.container }
         let current: ModelCatalog.Entry = lock.withLock { self.entry }
@@ -267,6 +361,72 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     }
 }
 
+
+/// One load in progress: its epoch, the progress fan-out for callers that join it, the
+/// task doing the work (so a model switch can cancel its download) and the signal its
+/// joiners and the next load's drain wait on.
+private final class ActiveLoad: @unchecked Sendable {
+    let epoch: Int
+    let done = LoadSignal()
+    let progress = LoadProgressFanout()
+    private let lock = NSLock()
+    private var task: Task<ModelContainer, Error>?
+    private var cancelled = false
+
+    init(epoch: Int) { self.epoch = epoch }
+
+    /// Returns false when the load was already superseded (the caller cancels the task).
+    func attach(_ task: Task<ModelContainer, Error>) -> Bool {
+        lock.withLock {
+            self.task = task
+            return !cancelled
+        }
+    }
+
+    func cancel() {
+        let task: Task<ModelContainer, Error>? = lock.withLock {
+            cancelled = true
+            return self.task
+        }
+        task?.cancel()
+    }
+
+    /// Drops the finished task, and with it the container it returned, so a discarded
+    /// model's weights are freed before anyone draining this load measures memory.
+    func detach() { lock.withLock { task = nil } }
+}
+
+/// A one-shot completion with the load's error (nil on success). Waiting is not
+/// cancellable: the load it waits for always ends (a weight read can't be stopped, but
+/// it finishes), and the caller checks cancellation right after.
+private final class LoadSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private var error: Error?
+    private var waiters: [CheckedContinuation<Error?, Never>] = []
+
+    func finish(_ error: Error?) {
+        let waiting: [CheckedContinuation<Error?, Never>] = lock.withLock {
+            finished = true
+            self.error = error
+            defer { waiters = [] }
+            return waiters
+        }
+        for waiter in waiting { waiter.resume(returning: error) }
+    }
+
+    func wait() async -> Error? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Error?, Never>) in
+            let result: (done: Bool, error: Error?) = lock.withLock {
+                if finished { return (true, error) }
+                waiters.append(continuation)
+                return (false, nil)
+            }
+            if result.done { continuation.resume(returning: result.error) }
+        }
+    }
+}
+
 /// Fans one load's progress out to every caller waiting on it; late joiners get the last value.
 private final class LoadProgressFanout: @unchecked Sendable {
     private let lock = NSLock()
@@ -290,20 +450,6 @@ private final class LoadProgressFanout: @unchecked Sendable {
     }
 }
 
-/// Superseded loads a new load must wait for. Emptied after waiting, so the new load
-/// doesn't keep their (discarded) containers alive while it allocates its own.
-private final class DrainBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var tasks: [Task<ModelContainer, Error>]
-    init(_ tasks: [Task<ModelContainer, Error>]) { self.tasks = tasks }
-
-    func drain() async {
-        while let next: Task<ModelContainer, Error> = lock.withLock({ tasks.popLast() }) {
-            _ = try? await next.value
-        }
-    }
-}
-
 /// A conversation that refuses to grow past the model's context budget instead of letting
 /// the KV cache grow without bound (or a rotating cache silently drop the system prompt).
 /// The size is estimated from characters (~3 per token, conservative for English and JSON).
@@ -312,6 +458,8 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
     private let limitChars: Int?
     private let lock = NSLock()
     private var usedChars: Int
+    /// The task relaying the current reply; awaited by `synchronize`.
+    private var relay: Task<Void, Never>?
 
     init(session: ChatSession, contextTokens: Int? = nil, instructions: String = "", extraChars: Int = 0) {
         self.session = session
@@ -349,6 +497,14 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
         return map(session.streamDetails(to: messages))
     }
 
+    /// Cancelling the consumer only *requests* a stop; the session's runner may
+    /// still be decoding. This waits for the relay and the session's runners.
+    func synchronize() async {
+        let task = lock.withLock { relay }
+        await task?.value
+        await session.synchronize()
+    }
+
     private static func failed(_ error: Error) -> AsyncThrowingStream<ModelEvent, Error> {
         AsyncThrowingStream { $0.finish(throwing: error) }
     }
@@ -383,6 +539,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+            lock.withLock { relay = task }
             continuation.onTermination = { _ in task.cancel() }
         }
     }

@@ -121,6 +121,14 @@ final class MemoryHarness {
         }
     }
 
+    /// A benchmark needs the memory to itself: stop background work and drop the
+    /// embedder. It loads again at the next idle moment after a chat.
+    func releaseForBenchmark() async {
+        await preemptBackgroundWork()
+        await embedder.unload()
+        embedderLoaded = false
+    }
+
     private func changed() { revision += 1 }
 
     // MARK: Context assembly
@@ -365,7 +373,7 @@ final class MemoryHarness {
     /// fleet tasks. Never call this while already holding the gate (it isn't
     /// reentrant): context assembly runs inside the chat's gate and embeds directly.
     nonisolated static func withGPU<T: Sendable>(_ who: String, _ body: @Sendable () async throws -> T) async throws -> T {
-        await GPUGate.shared.acquire(who)
+        try await GPUGate.shared.acquire(who)
         do {
             let value = try await body()
             await GPUGate.shared.release()

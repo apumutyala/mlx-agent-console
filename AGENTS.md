@@ -23,7 +23,10 @@ Read [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) first. It covers the goa
   - Exactly one shared poller (`tools/ci_status.py poll`, run by the coordinator) calls GitHub once every 2 minutes and writes `~/.ci-status/mlx-agent-console.json`.
   - `wait` and `show` only read that file.
   - Call `gh run view <id> --log-failed` once, only for a failed run.
-- macOS minutes are expensive, so batch your fixes.
+- **CI budget rule (hard, 2026-11-27):** agents do not dispatch CI.
+  - The account has 2,000 Actions minutes a month, and macOS bills at 10× on this private repo. One night of per-agent builds used 1,829 minutes.
+  - Work compile-unverified: re-read your Swift carefully, and run Python/NumPy tests locally. Mark the PR "compile-unverified".
+  - The coordinator runs at most one batched build of the merged branch, and only when it will become an iPad build the user can install.
 - Keep `SWIFT_VERSION` 5.0. `MLXArray` is not `Sendable`, so serialize inside `container.perform`.
 
 ## PR body checklist
