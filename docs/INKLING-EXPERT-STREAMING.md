@@ -7,8 +7,8 @@ The design and its sources are in the research note `INKLING-SSD-EXPERT-STREAMIN
 
 | Tier (catalog id) | Slots per layer | Expert memory | Weights resident | Est. footprint | Fits a free sideload (~5.3 GB)? |
 |---|---|---|---|---|---|
-| `inkling2-mini-dwq3.1-stream19` | 24 | 1.54 GB | 2.90 GB | ~3.6 GB (4K) | yes |
-| `inkling2-mini-dwq3.1-stream25` | 32 | 2.06 GB | 3.42 GB | ~4.1 GB (4K), ~4.3 GB (8K) | yes, the largest that does |
+| `inkling2-mini-dwq3.1-stream19` | 24 | 1.54 GB | 2.90 GB | ~3.7 GB (4K) | yes |
+| `inkling2-mini-dwq3.1-stream25` | 32 | 2.06 GB | 3.42 GB | ~4.2 GB (4K, 512-token steps) | yes, the largest that does |
 | `inkling2-mini-dwq3.1-stream50` | 64 | 4.12 GB | 5.48 GB | ~6.4 GB | no (needs increased-memory-limit) |
 | `inkling2-mini-dwq3.1-stream100` | 128 | 8.24 GB | 9.60 GB | ~10.5 GB | no |
 | `inkling2-mini-dwq3.1` (resident) | n/a | 8.24 GB | 9.60 GB | ~10.5 GB | no |
@@ -144,6 +144,56 @@ benchmark screen and 128 generated tokens:
   This prints the hit rate of the app's decayed-use policy, LRU and the oracle at each `S`, plus
   the loop-pass Jaccard overlap and the expert-visits per token. Those numbers feed the hit-rate
   rows of the design's budget table.
+
+## Loop revisits, prefill and expected speed (model, to be measured)
+
+**Loop revisits.** Inkling runs core layers 6–18 three times, so a token makes 48 logical layer
+visits (384 expert lookups). The slot pool belongs to the **physical** layer, and only that layer's
+own calls can evict its slots. Between pass p and pass p+1 of layer L, nothing else touches L's
+pool, so a revisit that routes to an expert used in pass p is always a hit. The trace logs every
+logical visit: `v` is the visit and `l` the physical layer. `expert_trace_sim.py` reports the
+pass-overlap Jaccard from it.
+
+**Decode, per token.** The model is
+`t ≈ T_compute + T_sync + misses × 2.68 MB / BW`, with:
+
+- `misses = 384 × (1 − h)`;
+- `T_compute ≈ 27–33 ms`. This is calibrated from the device receipt (LFM3 at ~110 GB/s effective).
+  A resident token reads about 1.0 GB of experts plus about 1.9 GB of attention and head weights;
+- `T_sync ≈ 48 × 0.2 ms`, which is unmeasured.
+
+At S = 32 and BW = 4 GB/s:
+
+| Hit rate h | Misses/token | Read time | Decode tok/s |
+|---|---|---|---|
+| 0.90 | 38 | 26 ms | ~14 |
+| 0.85 (design assumption) | 58 | 39 ms | ~12 |
+| 0.80 | 77 | 52 ms | ~10.5 |
+| 0.67 (pessimistic, gemma-like) | 127 | 85 ms | ~7.8 |
+
+≥10 tok/s needs h ≥ ~0.80 at 4 GB/s, or h ≥ ~0.87 at 2.5 GB/s. Two facts help: revisits always
+hit, and 64 of the 384 lookups are in the coda and prelude. The trace from run A settles it.
+
+**Prefill (bounded pool).** One call needs `rows × K` route slots. When its distinct experts
+exceed S, it is split per expert group (expert-major chunks of at most S experts, resident ones
+first), so each needed expert is read **once per visit per prefill step**, whatever the step
+length. That is the "ubatch × top_k ≤ slots" constraint of llama.cpp #23324, solved by grouping
+rather than by tiny micro-batches.
+
+A 512-row step at S = 32 needs about all 128 experts per visit, so about 96 misses × 2.68 MB × 48
+visits ≈ 12.3 GB is read per step. That is ~3.1 s at 4 GB/s, plus compute. So the streamed tiers
+use **512-token steps**; 256-token steps would double the reads.
+
+| Prompt | Steps (512) | Reads | TTFT estimate (4 GB/s) |
+|---|---|---|---|
+| 1K tokens | 2 | ~25 GB | ~8–9 s |
+| 4K tokens | 8 | ~98 GB | ~30–35 s |
+
+This is the price of a 4.6 GB footprint. Larger steps cut it further, but the attention scratch
+grows. *Exact prefill* (3-token steps) is for the gate only, and is very slow.
+
+LFM2.5-8B-A1B is much cheaper. It has 22 visits and top-4 of 32, so at S = 24 a step misses
+about 8 experts × 6.19 MB × 22 ≈ 1.1 GB, or ~0.27 s per step.
 
 ## Known limits
 

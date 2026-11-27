@@ -140,8 +140,9 @@ enum ModelCatalog {
     // ≈ 0.2 GB, which still fits at 32 slots (≈ 4.3 GB).
 
     /// 32 of 128 experts per layer resident (3.42 GB weights): the largest tier that fits the
-    /// ~5.3 GB free-sideload limit with headroom. 4K context and 256-token prefill steps keep the
-    /// rest of the footprint small.
+    /// ~5.3 GB free-sideload limit with headroom. 4K context keeps KV small; 512-token prefill steps
+    /// halve TTFT vs 256 (a streamed prefill re-reads ~96 experts per visit per step regardless of
+    /// the step length) for ~0.1 GB more attention scratch.
     static let inkling2MiniStream25: Entry = {
         var e = inklingStreamed(
             id: "inkling2-mini-dwq3.1-stream25", name: "Inkling 2 Mini · streamed 25%", fraction: 0.25,
@@ -149,7 +150,7 @@ enum ModelCatalog {
             note: "The 3.1-bit DWQ build with 25% of experts in memory, the rest read from storage. "
                 + "Fits the default per-app memory limit; experimental.")
         e.contextTokens = 4096
-        e.prefillStepSize = 256
+        e.prefillStepSize = 512
         return e
     }()
     /// 24 of 128 (2.90 GB weights): fallback if the 25% tier is killed for memory.
@@ -159,7 +160,7 @@ enum ModelCatalog {
             minimumMemoryGB: 7,
             note: "Like the 25% tier with fewer experts in memory: ~0.5 GB smaller, slower.")
         e.contextTokens = 4096
-        e.prefillStepSize = 256
+        e.prefillStepSize = 512
         return e
     }()
     /// 64 of 128 resident: ~5.5 GB weights. Needs the increased-memory-limit entitlement.
