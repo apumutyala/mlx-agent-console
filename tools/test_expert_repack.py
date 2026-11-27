@@ -248,6 +248,64 @@ class RepackTests(unittest.TestCase):
         with self.assertRaises(er.RepackError):
             er.repack(self.src, self.out, "none", log=self.quiet)
 
+    def test_switch_glu_layout_round_trip(self):
+        """LFM2 MoE shaped: dense layer 0, switch_mlp gate/up/down experts in layers 1-2."""
+        rng = np.random.default_rng(7)
+        self.src.mkdir()
+        tensors = {"model.embed_tokens.weight": (
+            "BF16", rng.integers(0, 2**16, (50, HIDDEN), dtype=np.uint64).astype(np.uint16))}
+        tensors["model.layers.0.feed_forward.gate_proj.weight"] = (
+            "U32", rng.integers(0, 2**32, (INTER, HIDDEN // 8), dtype=np.uint64).astype(np.uint32))
+        for layer in (1, 2):
+            p = f"model.layers.{layer}.feed_forward"
+            tensors[f"{p}.expert_bias"] = ("BF16", np.zeros((EXPERTS,), np.uint16))
+            for proj, (out_dims, in_dims) in {"gate_proj": (INTER, HIDDEN), "up_proj": (INTER, HIDDEN),
+                                              "down_proj": (HIDDEN, INTER)}.items():
+                for part, value in quantized(rng, out_dims, in_dims, 4).items():
+                    tensors[f"{p}.switch_mlp.{proj}.{part}"] = value
+        write_safetensors(self.src / "model.safetensors", tensors, {"format": "mlx"})
+        (self.src / "config.json").write_text(json.dumps({
+            "model_type": "lfm2_moe", "hidden_size": HIDDEN, "intermediate_size": 4 * INTER,
+            "moe_intermediate_size": INTER, "num_experts": EXPERTS, "num_experts_per_tok": 2,
+            "quantization": {"group_size": GROUP, "bits": 4, "mode": "affine"}}))
+        manifest = er.repack(self.src, self.out, "all", log=self.quiet)
+        self.assertEqual([l["layer"] for l in manifest["layers"]], [1, 2])
+        l1 = manifest["layers"][0]
+        self.assertEqual(l1["layout"], "switch_glu")
+        self.assertEqual(l1["tensor_prefix"], "model.layers.1.feed_forward.switch_mlp")
+        self.assertEqual([f["name"] for f in l1["fields"]][:3],
+                         ["gate_proj.weight", "gate_proj.scales", "gate_proj.biases"])
+        self.assertEqual(l1["projections"]["down_proj"]["input_dims"], INTER)
+        self.assertEqual(l1["projections"]["up_proj"]["input_dims"], HIDDEN)
+        blob = (self.out / "experts.bin").read_bytes()
+        for f in l1["fields"]:
+            for e in range(EXPERTS):
+                start = l1["base_offset"] + e * l1["record_stride"] + f["offset"]
+                self.assertEqual(blob[start:start + f["nbytes"]],
+                                 np.ascontiguousarray(tensors[f["tensor"]][1][e]).tobytes())
+        core = er.read_shard(self.out / "model.safetensors").tensors
+        self.assertIn("model.layers.1.feed_forward.expert_bias", core)
+        self.assertIn("model.layers.0.feed_forward.gate_proj.weight", core)
+        self.assertFalse(any("switch_mlp" in n for n in core))
+
+    def test_real_lfm25_8b_header_plan(self):
+        """LiquidAI/LFM2.5-8B-A1B-MLX-4bit layer 3 shapes (header only): 32 experts of 6.19 MB."""
+        tensors = {}
+        p = "model.layers.3.feed_forward.switch_mlp"
+        for proj, out_dims, packed, groups in (("gate_proj", 1792, 256, 32), ("up_proj", 1792, 256, 32),
+                                               ("down_proj", 2048, 224, 28)):
+            for part, dtype, last in (("weight", "U32", packed), ("scales", "BF16", groups),
+                                      ("biases", "BF16", groups)):
+                shape = [32, out_dims, last]
+                n = int(np.prod(shape)) * er.DTYPE_SIZES[dtype]
+                tensors[f"{p}.{proj}.{part}"] = er.TensorInfo(f"{p}.{proj}.{part}", dtype, shape, 0, n, Path("x"))
+        config = {"hidden_size": 2048, "intermediate_size": 7168, "moe_intermediate_size": 1792,
+                  "num_experts": 32, "num_experts_per_tok": 4}
+        (layer,) = er.plan_layers(tensors, config)
+        self.assertEqual(layer.projections["down_proj"].bits, 4)
+        self.assertEqual(layer.projections["gate_proj"].group_size, 64)
+        self.assertEqual(layer.record_bytes, 6193152)
+
     def test_real_dwq_header_plan(self):
         """The plan for the real LocallyInferred 3.1bpw-DWQ layer 0 / 9 shapes (header only)."""
         tensors = {}

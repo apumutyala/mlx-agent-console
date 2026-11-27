@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Repack an MLX Inkling 2 build for SSD expert streaming.
+"""Repack an MLX mixture-of-experts build for SSD expert streaming.
 
-Input: a model directory that mlx-swift-lm PR #821 loads (mlx-lm #2086 layout), i.e. safetensors
-shards holding stacked routed experts
+Input: an MLX model directory whose safetensors shards hold stacked routed experts, with the
+expert dimension outermost (`[E, out, packed]`). Two layouts are recognised per layer:
 
-    <prefix>.layers.<L>.mlp.experts.{gate_up_proj,down_proj}.{weight,scales,biases[,global_scale]}
+    inkling2    <prefix>.layers.<L>.mlp.experts.{gate_up_proj,down_proj}.{weight,scales,biases[,global_scale]}
+                (Inkling 2, mlx-lm #2086 layout, as mlx-swift-lm PR #821 loads it)
+    switch_glu  <prefix>.layers.<L>.{feed_forward,mlp}.switch_mlp.{gate_proj,up_proj,down_proj}.{...}
+                (mlx-lm SwitchGLU: LFM2 MoE, Qwen MoE, ...)
 
-with the expert dimension outermost (`[E, out, packed]`).
+`down*` projections take the MoE intermediate size as input, the others the hidden size.
 
 Output (a new directory):
 
@@ -50,9 +53,13 @@ FIELD_ALIGNMENT = 256
 COPY_CHUNK = 8 * 1024 * 1024
 
 EXPERT_RE = re.compile(
-    r"^(?P<prefix>.*\.layers\.(?P<layer>\d+)\.mlp\.experts)\."
-    r"(?P<proj>gate_up_proj|down_proj)\.(?P<part>weight|scales|biases|global_scale)$")
-PROJECTIONS = ("gate_up_proj", "down_proj")
+    r"^(?P<prefix>.*\.layers\.(?P<layer>\d+)\.(?:mlp\.experts|(?:feed_forward|mlp)\.switch_mlp))\."
+    r"(?P<proj>gate_up_proj|gate_proj|up_proj|down_proj)\.(?P<part>weight|scales|biases|global_scale)$")
+# Layout name -> projections in record order.
+LAYOUTS = {
+    "inkling2": ("gate_up_proj", "down_proj"),
+    "switch_glu": ("gate_proj", "up_proj", "down_proj"),
+}
 PARTS = ("weight", "scales", "biases", "global_scale")
 
 DTYPE_SIZES = {
@@ -202,6 +209,7 @@ class LayerSpec:
     experts: int
     fields: List[FieldSpec]
     projections: Dict[str, Projection]
+    layout: str = "inkling2"
     record_bytes: int = 0
     record_stride: int = 0
     base_offset: int = 0
@@ -263,7 +271,7 @@ def plan_layers(tensors: Dict[str, TensorInfo], config: dict) -> List[LayerSpec]
             raise RepackError(f"layer {layer}: two expert prefixes")
         grouped.setdefault(layer, {}).setdefault(m["proj"], {})[m["part"]] = t
     if not grouped:
-        raise RepackError("no stacked expert tensors (…mlp.experts.{gate_up_proj,down_proj}.*) found")
+        raise RepackError("no stacked expert tensors (mlp.experts.* or switch_mlp.*) found")
 
     layers = []
     for layer in sorted(grouped):
@@ -271,10 +279,13 @@ def plan_layers(tensors: Dict[str, TensorInfo], config: dict) -> List[LayerSpec]
         fields: List[FieldSpec] = []
         projections: Dict[str, Projection] = {}
         experts = None
-        for proj in PROJECTIONS:
-            if proj not in projs or "weight" not in projs[proj] or "scales" not in projs[proj]:
+        layout = next((n for n, ps in LAYOUTS.items() if set(ps) == set(projs)), None)
+        if layout is None:
+            raise RepackError(f"layer {layer}: projections {sorted(projs)} match no known layout")
+        for proj in LAYOUTS[layout]:
+            if "weight" not in projs[proj] or "scales" not in projs[proj]:
                 raise RepackError(f"layer {layer}: {proj} needs weight and scales")
-            input_dims = hidden if proj == "gate_up_proj" else inter
+            input_dims = inter if proj.startswith("down") else hidden
             declared = quant.get(f"{prefixes[layer]}.{proj}")
             projections[proj] = infer_projection(proj, projs[proj], input_dims,
                                                  declared if isinstance(declared, dict) else None)
@@ -294,7 +305,7 @@ def plan_layers(tensors: Dict[str, TensorInfo], config: dict) -> List[LayerSpec]
             offset = align(offset, FIELD_ALIGNMENT)
             f.offset = offset
             offset += f.expert_bytes
-        spec = LayerSpec(layer, prefixes[layer], experts, fields, projections)
+        spec = LayerSpec(layer, prefixes[layer], experts, fields, projections, layout)
         spec.record_bytes = offset
         spec.record_stride = align(offset, RECORD_ALIGNMENT)
         layers.append(spec)
@@ -383,6 +394,7 @@ def manifest_json(layers: List[LayerSpec], file_bytes: int, config: dict,
             {
                 "layer": l.layer,
                 "tensor_prefix": l.prefix,
+                "layout": l.layout,
                 "experts": l.experts,
                 "base_offset": l.base_offset,
                 "record_bytes": l.record_bytes,
