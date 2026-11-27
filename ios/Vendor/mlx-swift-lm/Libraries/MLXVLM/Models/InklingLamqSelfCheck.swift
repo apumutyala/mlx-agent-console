@@ -87,7 +87,8 @@ public enum InklingLamqSelfCheck {
         // 1. Lookup tables.
         let lutsNpz = try InklingLamqNpz(url: directory.appendingPathComponent("luts.npz"))
         for (name, want) in expected.luts.sorted(by: { $0.key < $1.key }) {
-            note(sha256(try lutsNpz.bytes(name)) == want, "luts.npz \(name) bytes")
+            let bytes = try lutsNpz.bytes(name)
+            note(sha256(bytes) == want, "luts.npz \(name) bytes")
         }
         let tables = try InklingLamqTables(directory: directory)
 
@@ -120,9 +121,12 @@ public enum InklingLamqSelfCheck {
             let x = MLXRandom.normal([2, lm.n])
             let y = lin(x)
             let si = try npz.array("lin_\(lm.safe)_signs_in").asType(.float32)
-            var ref = matmul(try InklingLamqRotation.of(lm.n).input(x, signs: si), q.transposed())
+            let rotIn = try InklingLamqRotation.of(lm.n)
+            var ref = matmul(rotIn.input(x, signs: si), q.transposed())
             if lm.out_rot == true {
-                ref = try InklingLamqRotation.of(lm.m).output(ref, signs: try npz.array("lin_\(lm.safe)_signs_out"))
+                let rotOut = try InklingLamqRotation.of(lm.m)
+                let so = try npz.array("lin_\(lm.safe)_signs_out")
+                ref = rotOut.output(ref, signs: so)
             }
             let err = (abs(y - ref).max() / (abs(ref).max() + 1e-12)).item(Float.self)
             note(err < 1e-3, "\(name): fused matvec vs dequant+matmul, rel err \(err)")
