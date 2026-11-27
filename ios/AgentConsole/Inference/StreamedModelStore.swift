@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Downloads SSD-streamed model builds (core shards + `experts.bin` + `experts.json`, made offline
@@ -25,6 +26,7 @@ enum StreamedModelStore {
         case http(Int, String)
         case sizeMismatch(String, expected: Int64, got: Int64)
         case incomplete(String)
+        case corrupt(String)
 
         var errorDescription: String? {
             switch self {
@@ -36,6 +38,7 @@ enum StreamedModelStore {
                 return "\(file) is \(got) bytes, the server listed \(expected)."
             case .incomplete(let name):
                 return "\(name) is missing experts.json or experts.bin; was it made with tools/expert_repack.py?"
+            case .corrupt(let m): return "The downloaded experts.bin does not match experts.json (\(m)); it was deleted, download again."
             }
         }
     }
@@ -94,13 +97,39 @@ enum StreamedModelStore {
             let target = dir.appendingPathComponent(file.name)
             if let size = fileSize(target), size == file.size { counter.add(size); continue }
             let part = dir.appendingPathComponent(file.name + ".part")
-            let have = fileSize(part) ?? 0
-            counter.add(min(have, file.size))
-            var fileRequest = URLRequest(url: buildURL.appendingPathComponent(file.name), timeoutInterval: 120)
-            if let token { fileRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-            try await RangeDownload(part: part, alreadyHave: have, counter: counter).run(fileRequest, what: file.name)
+            var have = fileSize(part) ?? 0
+            if have > file.size {
+                // Longer than the listing (the build changed on the server): start over.
+                try? FileManager.default.removeItem(at: part)
+                have = 0
+            }
+            counter.add(have)
+            // A .part that already holds the whole file needs no request: asking for
+            // `bytes=<size>-` would get 416 forever.
+            if have < file.size {
+                var fileRequest = URLRequest(url: buildURL.appendingPathComponent(file.name), timeoutInterval: 120)
+                if let token { fileRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+                do {
+                    try await RangeDownload(part: part, alreadyHave: have, counter: counter).run(fileRequest, what: file.name)
+                } catch StoreError.http(416, _) {
+                    // The server can't serve the range we hold: drop the partial file, retry once whole.
+                    try? FileManager.default.removeItem(at: part)
+                    try await RangeDownload(part: part, alreadyHave: 0, counter: counter).run(fileRequest, what: file.name)
+                }
+            }
             let got = fileSize(part) ?? -1
-            guard got == file.size else { throw StoreError.sizeMismatch(file.name, expected: file.size, got: got) }
+            guard got == file.size else {
+                if got > file.size { try? FileManager.default.removeItem(at: part) }
+                throw StoreError.sizeMismatch(file.name, expected: file.size, got: got)
+            }
+            if file.name == "experts.bin" {
+                do {
+                    try verifyExperts(part, manifest: dir.appendingPathComponent("experts.json"))
+                } catch {
+                    try? FileManager.default.removeItem(at: part)
+                    throw error
+                }
+            }
             try? FileManager.default.removeItem(at: target)
             try FileManager.default.moveItem(at: part, to: target)
         }
@@ -108,6 +137,61 @@ enum StreamedModelStore {
         try marker.write(to: dir.appendingPathComponent(completeMarker), options: .atomic)
         progress(1)
         return dir
+    }
+
+    /// The fields of `experts.json` that describe `experts.bin` (tools/expert_repack.py).
+    private struct ExpertsManifest: Decodable {
+        struct Layer: Decodable {
+            let layer: Int
+            let experts: Int
+            let baseOffset: Int64
+            let recordStride: Int64
+            let sha256: String
+            enum CodingKeys: String, CodingKey {
+                case layer, experts, sha256
+                case baseOffset = "base_offset"
+                case recordStride = "record_stride"
+            }
+        }
+        let fileBytes: Int64
+        let layers: [Layer]
+        enum CodingKeys: String, CodingKey {
+            case layers
+            case fileBytes = "file_bytes"
+        }
+    }
+
+    /// Checks `experts.bin` (still at `.part`) against the manifest before it is published: its size
+    /// and each layer's SHA-256 over its records. experts.json downloads first (files go smallest
+    /// first), so it is already in place. About 8 GB at flash speed: a few seconds, once.
+    private static func verifyExperts(_ bin: URL, manifest url: URL) throws {
+        let manifest: ExpertsManifest
+        do { manifest = try JSONDecoder().decode(ExpertsManifest.self, from: Data(contentsOf: url)) } catch {
+            throw StoreError.badListing("experts.json: \(error.localizedDescription)")
+        }
+        let size = fileSize(bin) ?? -1
+        guard size == manifest.fileBytes else {
+            throw StoreError.corrupt("\(size) bytes, experts.json says \(manifest.fileBytes)")
+        }
+        let handle = try FileHandle(forReadingFrom: bin)
+        defer { try? handle.close() }
+        let chunk = 8 << 20
+        for layer in manifest.layers {
+            try Task.checkCancellation()
+            try handle.seek(toOffset: UInt64(layer.baseOffset))
+            var remaining = Int64(layer.experts) * layer.recordStride
+            var hasher = SHA256()
+            while remaining > 0 {
+                let data = try autoreleasepool { try handle.read(upToCount: Int(min(Int64(chunk), remaining))) } ?? Data()
+                if data.isEmpty { throw StoreError.corrupt("layer \(layer.layer) is truncated") }
+                hasher.update(data: data)
+                remaining -= Int64(data.count)
+            }
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            guard digest == layer.sha256.lowercased() else {
+                throw StoreError.corrupt("layer \(layer.layer) SHA-256 differs")
+            }
+        }
     }
 
     private static func prepare(_ dir: URL) throws {
