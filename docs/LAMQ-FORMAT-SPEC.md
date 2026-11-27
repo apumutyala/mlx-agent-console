@@ -330,7 +330,7 @@ Budget: 4.7 GB needs ≈ 0.6 GB streamed (S ≈ 110 of 128 experts per layer); 5
 | Metal compiles | `ios/tools/kernels/check_lamq_metal_kernels.py --compile` (156 instantiations) in CI | sources generate locally; **compile not run (CI freeze)** |
 | Metal == reference on device | Settings › Inkling 2 Mini · LookAtMyQuant › self-check. It downloads `layer_07_packed.npz` + meta + `luts.npz` (≈ 190 MB); layer 7 uses every layer format of the build. It checks the LUT bytes, GPU-dequantizes all 6 linears and the experts covering every format, and compares SHA-256 with the digests above. It also checks 4 rows per linear against a scalar Swift decode (bit for bit), fused matvec against dequant+matmul, and the Hadamard round trip. | **not run** |
 | Steering map + strict-update coverage | `test_steering_map.py`: literal port of the Swift map and PR #821's parameter tree vs the real 3.9 GB steering header | 0 missing / 0 extra / 0 shape mismatches (4 tests pass) |
-| 3.9 GB formats in the bit-exact check | 3.9 GB layer 0 + all 8 head buckets via `crosscheck_lamq_torch.py` | RESULT_39 |
+| 3.9 GB formats in the bit-exact check | 3.9 GB layer 0 + all 8 head buckets via `crosscheck_lamq_torch.py` | **270/270 tensors bit-identical** (585 s): layer 0, all 6 linears (ht3, rtr4) + 256 expert sides (ht2, rtr1), and all 8 head buckets (lm6, rtr2–4). Digests: `lamq_digests_3.9GB.json` |
 | End-to-end generation (3.9 GB) | wired; needs a build and the device | **not run**: compile-unverified, no greedy-agreement gate yet |
 
 ## What is left (in order)
