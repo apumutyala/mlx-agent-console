@@ -1769,7 +1769,7 @@ struct Inkling2ExpertTensors {
     /// Whether the fused expert kernels read this format with `inputDims` per row.
     func supportsFusedDecode(inputDims: Int) -> Bool {
         let modes: [QuantizationMode] = [.affine, .nvfp4, .mxfp4, .mxfp8]
-        // [agent-console patch C] `lowBitAffine` is a local A/B switch; upstream drops it.
+        // [agent-console patch K2] `lowBitAffine` is a local A/B switch; upstream drops it.
         let lowBit = Inkling2FusedDecodeOptions.lowBitAffine
         let bits = format.mode == .affine && lowBit ? [2, 3, 4, 8] : [4, 8]
         return modes.contains(format.mode) && bits.contains(format.bits)

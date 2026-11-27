@@ -28,6 +28,16 @@ def hand_pack(codes, bits):
     return np.array(out, dtype=np.uint8)
 
 
+class SourceGuardTests(unittest.TestCase):
+    def test_port_matches_the_metal_source(self):
+        """The ported kernels describe the Metal source as it is now."""
+        current = ref.metal_source_sha256()
+        self.assertEqual(
+            current, ref.METAL_SOURCE_SHA256,
+            "The Metal expert kernels in Inkling2Kernels.swift changed: update the reference "
+            f"port in inkling2_expert_ref.py to match, then set METAL_SOURCE_SHA256 = \"{current}\".")
+
+
 class PackingTests(unittest.TestCase):
     def test_hand_made_bytes_3bit(self):
         codes = list(range(8)) + [7, 0, 5, 2, 3, 6, 1, 4]

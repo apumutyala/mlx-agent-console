@@ -129,8 +129,7 @@ private struct MemorySection: View {
             if let report = UserDefaults.standard.string(forKey: MemoryBudget.lastLoadReportKey) {
                 Text("Last large load: \(report)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Toggle("Fused 2/3-bit Inkling experts", isOn: $fusedLowBitExperts)
-                .onChange(of: fusedLowBitExperts) { MLXBackend.applyKernelOptions() }
+            Toggle("Fused 2/3-bit Inkling experts (applies on next load)", isOn: $fusedLowBitExperts)
             Toggle("Inkling kernel self-check on load", isOn: $kernelSelfCheck)
             if let check = UserDefaults.standard.string(forKey: MLXBackend.kernelSelfCheckReportKey) {
                 Text("Kernel self-check (fused vs unfused experts): \(check)")

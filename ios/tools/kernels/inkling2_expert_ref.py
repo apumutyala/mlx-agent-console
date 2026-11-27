@@ -8,8 +8,10 @@ Two independent halves:
   share packing code, so a packing mistake in either shows up as a mismatch.
 * ``kernel_gate_up`` / ``kernel_down``: the Metal kernels ``inkling2_expert_gate_up`` and
   ``inkling2_expert_down`` in ios/Vendor/mlx-swift-lm/Libraries/MLXVLM/Models/Inkling2Kernels.swift,
-  ported line by line (same grid loops, lane loop, byte offsets and rounding points) onto flat
-  byte / scale / bias buffers, so an indexing bug in the Metal source shows up here too.
+  ported by hand, line by line (same grid loops, lane loop, byte offsets and rounding points),
+  onto flat byte / scale / bias buffers, so an indexing bug in the Metal source shows up here too.
+  The port is not generated from the Metal, so ``METAL_SOURCE_SHA256`` pins the source it was
+  written against; the tests fail when the Metal changes until the port is updated.
 
 ``dense_reference`` is the plain math (dequantize, matmul, softcapped SwiGLU, weighted sum,
 short convolution, residual) that both must equal.
@@ -20,6 +22,21 @@ from __future__ import annotations
 import numpy as np
 
 SIMD = 32
+
+# The Metal sources this file ports, and their SHA-256 (joined by NUL, as extracted by
+# check_metal_kernels.swift_strings). test_inkling2_expert_ref fails when the Swift file's
+# kernels change, so the port is updated with them.
+METAL_SOURCES = ('expertHeader', 'expertGateUpSource', 'expertDownSource', 'expertEpilogueTail')
+METAL_SOURCE_SHA256 = "76ad589af4c520c8634b4326d57bbdda4ef3b143bad4d88278bb0276d1d75a32"
+
+
+def metal_source_sha256(swift_path=None) -> str:
+    import hashlib
+
+    import check_metal_kernels
+
+    strings = check_metal_kernels.swift_strings(swift_path or check_metal_kernels.INKLING_KERNELS)
+    return hashlib.sha256("\0".join(strings[n] for n in METAL_SOURCES).encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------- rounding

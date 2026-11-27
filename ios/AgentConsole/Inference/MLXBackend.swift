@@ -169,18 +169,30 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     static let kernelSelfCheckKey = "inkling.kernelSelfCheck"
     static let kernelSelfCheckReportKey = "inkling.kernelSelfCheckReport"
     /// Settings toggle, on by default: fused decode kernels for 2/3-bit Inkling experts. Off
-    /// gives the unfused path in the same build, for the A/B. Applies from the next decode step.
+    /// gives the unfused path in the same build, for the A/B. Applied only when a model loads
+    /// (`loadLarge`), so one loaded model, and every generation on it, uses one path.
     static let fusedLowBitExpertsKey = "inkling.fusedLowBitExperts"
 
-    static func applyKernelOptions() {
+    private static func applyKernelOptions() {
         let defaults = UserDefaults.standard
         Inkling2FusedDecodeOptions.lowBitAffine =
             defaults.object(forKey: fusedLowBitExpertsKey) as? Bool ?? true
     }
 
-    /// Runs before the weights load, while the ~170 MB it needs is free.
+    /// Runs before the weights load, while the memory it needs
+    /// (`Inkling2KernelSelfCheck.peakBytes()`, 223 MB) is free; skips with a note when the
+    /// app has less than that plus 256 MB left.
     private static func runKernelSelfCheck() {
         let started = Date()
+        let needed = Inkling2KernelSelfCheck.peakBytes()
+        let available = MemoryBudget.availableBytes
+        if available > 0, available < needed + 256 * 1024 * 1024 {
+            UserDefaults.standard.set(
+                "\(started.formatted(date: .abbreviated, time: .standard)) · skipped: needs "
+                    + "\(MemoryBudget.gb(needed)) + 256 MB, the app has \(MemoryBudget.gb(available))",
+                forKey: kernelSelfCheckReportKey)
+            return
+        }
         let reports = Inkling2KernelSelfCheck.run()
         MLX.Memory.clearCache()
         let report = String(

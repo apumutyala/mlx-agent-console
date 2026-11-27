@@ -1,14 +1,23 @@
 // Copyright © 2026 Apple Inc.
-// [agent-console patch C] An on-device check of the fused decode expert kernels.
+// [agent-console patch K2] An A/B switch for, and an on-device check of, the fused decode expert
+// kernels.
 
 import Foundation
 import MLX
 
 /// Whether decode sends 2- and 3-bit affine experts to the fused kernels. On by default; off
-/// restores the 4/8-bit-only gate, so one build can be measured both ways. Read on every
-/// decode step.
+/// restores the 4/8-bit-only gate, so one build can be measured both ways.
+///
+/// Decode reads it once per layer and step, so set it only while no generation runs (the app
+/// sets it when it loads a model): a change mid-generation would mix the two paths.
 public enum Inkling2FusedDecodeOptions {
-    nonisolated(unsafe) public static var lowBitAffine = true
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var value = true
+
+    public static var lowBitAffine: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
 }
 
 /// Runs the fused decode expert kernels (``inkling2ExpertGateUp(_:experts:indices:softcaps:)``
@@ -58,8 +67,17 @@ public enum Inkling2KernelSelfCheck {
         (2, 2, 64), (2, 3, 64), (3, 2, 64), (3, 3, 64), (2, 3, 128), (4, 4, 64),
     ]
 
-    /// Runs `cases` on a layer of `experts` random experts. Allocates about
-    /// `experts * 3 * hidden * intermediate * 4` bytes of float32 weights (85 MB by default).
+    /// The peak bytes ``run(cases:hidden:intermediate:expertsPerToken:experts:softcaps:dtype:)``
+    /// allocates, about 7 bytes per expert weight: the float32 layer (4), one case's bfloat16
+    /// copy (2) and its quantized form (at most 4-bit with scales and biases, under 1). Inkling 2
+    /// Mini's defaults: 31.9 M weights, 223 MB (127 MB float32 + 64 MB bfloat16 + ~20 MB packed).
+    public static func peakBytes(hidden: Int = 2304, intermediate: Int = 1152, experts: Int = 4)
+        -> Int
+    {
+        7 * experts * 3 * hidden * intermediate
+    }
+
+    /// Runs `cases` on a layer of `experts` random experts; see ``peakBytes(hidden:intermediate:experts:)``.
     public static func run(
         cases: [(Int, Int, Int)] = defaultCases, hidden: Int = 2304, intermediate: Int = 1152,
         expertsPerToken: Int = 8, experts: Int = 4, softcaps: (Float, Float) = (4, 25),
