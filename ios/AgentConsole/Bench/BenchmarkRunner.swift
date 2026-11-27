@@ -21,6 +21,7 @@ struct BenchmarkRunner: Sendable {
 
     static let seed: UInt64 = 1234
     static let warmupTokens = 8
+    static let settleSeconds: Double = 10
     static let hashTokens = 64
     static let defaultRepetitions = 3
 
@@ -35,10 +36,23 @@ struct BenchmarkRunner: Sendable {
 
     /// Run every workload in `workloadIDs` (nil = all) `repetitions` times.
     /// Never throws: failures, skips and cancellation are recorded in the receipt.
+    /// The backend serves `entry` (benchmark mode) for the duration and drops it after,
+    /// so the chat model reloads on its next use.
     func run(entry: ModelCatalog.Entry, workloadIDs: [String]? = nil,
              repetitions: Int = BenchmarkRunner.defaultRepetitions,
              progress: @escaping @Sendable (Progress) -> Void = { _ in },
              isCancelled: @escaping @Sendable () -> Bool = { false }) async -> BenchReceipt {
+        progress(.init(message: "Unloading chat model", fraction: 0))
+        backend.beginBenchmark(entry)
+        let receipt = await measure(entry: entry, workloadIDs: workloadIDs, repetitions: repetitions,
+                                    progress: progress, isCancelled: isCancelled)
+        backend.endBenchmark()
+        return receipt
+    }
+
+    private func measure(entry: ModelCatalog.Entry, workloadIDs: [String]?, repetitions: Int,
+                         progress: @escaping @Sendable (Progress) -> Void,
+                         isCancelled: @escaping @Sendable () -> Bool) async -> BenchReceipt {
         let wallStart = Date()
         let reps = min(max(repetitions, 1), 10)
         let envBefore = await Self.environmentNow()
@@ -68,10 +82,21 @@ struct BenchmarkRunner: Sendable {
                 entry.minimumMemoryGB, ModelCatalog.deviceMemoryGB))
         }
 
-        // Only the measured model may be resident.
-        progress(.init(message: "Unloading chat model", fraction: 0))
-        backend.unload()
+        // Only the measured model may be resident (beginBenchmark dropped the chat model).
         MLX.Memory.clearCache()
+        // Idle settle: let freed memory return, background work quiet down and clocks
+        // drop before the footprint baseline is taken.
+        progress(.init(message: "Settling (\(Int(Self.settleSeconds)) s)", fraction: 0.01))
+        let settleEnd = Date().addingTimeInterval(Self.settleSeconds)
+        while Date() < settleEnd {
+            if isCancelled() || Task.isCancelled { return await finish("cancelled") }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        let held = MLX.Memory.activeMemory
+        if held > 64 * 1024 * 1024 {
+            receipt.warnings = [String(format: "%.0f MB of MLX memory was still held before loading (a chat or "
+                + "task still references an earlier model); footprint figures include it", Double(held) / 1e6)]
+        }
         let baseline = ResourceProbe.physFootprint()
         let available = ResourceProbe.availableMemory()
         let need = entry.downloadGB * 1_000_000_000 + Self.headroomBytes
@@ -86,32 +111,27 @@ struct BenchmarkRunner: Sendable {
             progress(.init(message: "Loading \(entry.displayName)", fraction: 0.02))
             let sawPartial = PartialFlag()
             let t0 = Date()
-            var container: ModelContainer? = try await MLXBackend.loadContainer(for: entry) { f in
+            var container: ModelContainer? = try await backend.loadBenchmarkModel { f in
                 if f > 0 && f < 1 { sawPartial.set() }
                 progress(.init(message: "Downloading \(entry.displayName) \(Int(f * 100))%", fraction: 0.02))
             }
             let firstLoad = Date().timeIntervalSince(t0)
             if let c = container { receipt.model = await Self.describe(entry: entry, container: c) }
             container = nil
-            MLX.Memory.clearCache()
+            backend.dropBenchmarkModel()
             if isCancelled() { return await finish("cancelled") }
 
             progress(.init(message: "Warm reload", fraction: 0.05))
             let t1 = Date()
-            let loaded = try await MLXBackend.loadContainer(for: entry) { _ in }
+            let loaded = try await backend.loadBenchmarkModel { _ in }
             let warmLoad = Date().timeIntervalSince(t1)
             let footprintLoaded = ResourceProbe.physFootprint()
             let availableLoaded = ResourceProbe.availableMemory()
 
-            // 2. Warm-up (kernel/pipeline compilation) — not recorded as a rep.
-            progress(.init(message: "Warm-up", fraction: 0.07))
-            let t2 = Date()
-            let warm = await Self.promptTokens(BenchWorkloads.short, container: loaded)
-            _ = try await Self.decode(container: loaded, prompt: warm, maxTokens: Self.warmupTokens)
             receipt.load = .init(
                 firstLoadS: firstLoad, downloadObserved: sawPartial.value, warmLoadS: warmLoad,
                 baselineFootprintBytes: baseline, footprintAfterLoadBytes: footprintLoaded,
-                availableAfterLoadBytes: availableLoaded, warmupS: Date().timeIntervalSince(t2))
+                availableAfterLoadBytes: availableLoaded, warmupS: 0)
 
             // 3. Workloads × reps.
             var maxThermal = ResourceProbe.thermal()
@@ -119,6 +139,15 @@ struct BenchmarkRunner: Sendable {
             var done = 0.0
             for w in workloads {
                 let prompt = await Self.promptTokens(w, container: loaded)
+                // 2. Warm-up at this workload's prompt length (Metal kernels are specialized per
+                // shape; w1 showed rep 1 of 1K/4K paying compile time). Not recorded as a rep.
+                if isCancelled() || Task.isCancelled { return await finish("cancelled") }
+                progress(.init(message: "\(entry.displayName) · \(w.id) · warm-up", fraction: 0.1 + 0.9 * done / total))
+                let tw = Date()
+                _ = try await Self.decode(container: loaded, entry: entry, prompt: prompt,
+                                         maxTokens: Self.warmupTokens, isCancelled: isCancelled)
+                let warmupS = Date().timeIntervalSince(tw)
+                receipt.load?.warmupS += warmupS
                 var repResults: [BenchReceipt.Rep] = []
                 var firstIDs: [Int] = []
                 var stopIndex: Int?
@@ -131,7 +160,9 @@ struct BenchmarkRunner: Sendable {
                     let thermalBefore = ResourceProbe.thermal()
                     let sampler = ResourceSampler()
                     sampler.start()
-                    let raw = try await Self.decode(container: loaded, prompt: prompt, maxTokens: w.maxTokens)
+                    let raw = try await Self.decode(container: loaded, entry: entry, prompt: prompt,
+                                                    maxTokens: w.maxTokens, isCancelled: isCancelled)
+                    if raw.tokens.count < w.maxTokens { return await finish("cancelled") }
                     let mem = sampler.stop()
                     let snap = MLX.Memory.snapshot()
                     let thermalAfter = ResourceProbe.thermal()
@@ -171,7 +202,7 @@ struct BenchmarkRunner: Sendable {
                     outputHash: Self.hash(firstIDs), outputTokenIds: firstIDs,
                     outputPreview: String(preview.prefix(300)),
                     deterministic: Set(repResults.map(\.outputHash)).count == 1,
-                    stopTokenIndex: stopIndex))
+                    stopTokenIndex: stopIndex, warmupS: warmupS))
             }
             receipt.environment.thermalMaxDuring = ResourceProbe.name(maxThermal)
             progress(.init(message: "Done", fraction: 1))
@@ -195,24 +226,24 @@ struct BenchmarkRunner: Sendable {
     }
 
     /// Greedy decode of exactly `maxTokens` tokens from raw prompt ids.
-    private static func decode(container: ModelContainer, prompt: [Int], maxTokens: Int) async throws -> RawRun {
+    /// Stops early (fewer tokens) when `isCancelled` turns true, checked before every step so
+    /// no new GPU work is submitted after the app starts leaving the foreground.
+    private static func decode(container: ModelContainer, entry: ModelCatalog.Entry, prompt: [Int], maxTokens: Int,
+                               isCancelled: @escaping @Sendable () -> Bool) async throws -> RawRun {
         try await container.perform { (ctx: ModelContext) -> RawRun in
             let clock = { Date.timeIntervalSinceReferenceDate }
             let input = LMInput(tokens: MLXArray(prompt.map { Int32($0) }))
-            var params = GenerateParameters()
-            params.maxTokens = maxTokens
-            params.temperature = 0          // greedy (argmax sampler)
-            params.seed = BenchmarkRunner.seed
+            let params = MLXBackend.benchmarkParameters(for: entry, maxTokens: maxTokens, seed: BenchmarkRunner.seed)
+            if isCancelled() || Task.isCancelled { throw CancellationError() }
             let start = clock()
             var iterator = try TokenIterator(input: input, model: ctx.model, parameters: params)
             let ready = clock()
             var tokens: [Int] = []
             tokens.reserveCapacity(maxTokens)
             var first = ready
-            while let t = iterator.next() {
+            while !isCancelled() && !Task.isCancelled, let t = iterator.next() {
                 if tokens.isEmpty { first = clock() }
                 tokens.append(t)
-                if Task.isCancelled { break }
             }
             let end = clock()
             // next() queued one more step; let it drain outside the timed region.
@@ -288,7 +319,8 @@ struct BenchmarkRunner: Sendable {
                           promptMode: "raw token ids, no chat template; filled prompts cut to exact length",
                           stopTokens: "ignored: every rep decodes max_tokens (first stop index recorded)",
                           timing: "wall clock around mlx-swift-lm TokenIterator; ttft = init + first next(); "
-                              + "decode_tps = (n-1)/(t_last - t_first)"),
+                              + "decode_tps = (n-1)/(t_last - t_first); one untimed warm-up per workload",
+                          settleS: settleSeconds),
             load: nil,
             environment: .init(thermalBefore: env.thermal, thermalAfter: env.thermal, thermalMaxDuring: env.thermal,
                                batteryLevelBefore: env.batteryLevel, batteryLevelAfter: env.batteryLevel,

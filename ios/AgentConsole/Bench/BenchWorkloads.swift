@@ -7,7 +7,10 @@ import Foundation
 /// Prompts are fed as raw token ids (no chat template) and cut to an exact
 /// token count per model, so "1K" means 1024 prompt tokens for every model.
 enum BenchWorkloads {
-    static let setVersion = "w1"
+    /// w2: an untimed warm-up decode at each workload's own prompt length (w1 warmed up
+    /// only the short prompt, so rep 1 of 1K/4K included Metal kernel compilation) and a
+    /// 10 s idle settle before the baseline. Prompts and lengths are unchanged from w1.
+    static let setVersion = "w2"
 
     struct Workload: Identifiable, Hashable, Sendable {
         enum Prompt: Hashable, Sendable {
@@ -24,16 +27,16 @@ enum BenchWorkloads {
     }
 
     static let short = Workload(
-        id: "short-128", version: 1, description: "short prompt → 128 tokens",
+        id: "short-128", version: 2, description: "short prompt → 128 tokens",
         prompt: .short("Explain step by step how a bicycle's gears, chain and brakes work together, "
                        + "then list three common maintenance mistakes."),
         maxTokens: 128)
     static let oneK = Workload(
-        id: "1k-256", version: 1, description: "1024-token prompt → 256 tokens",
+        id: "1k-256", version: 2, description: "1024-token prompt → 256 tokens",
         prompt: .filled(tokens: 1024, instruction: "\n\nSummarize the field notes above in detail.\n"),
         maxTokens: 256)
     static let fourK = Workload(
-        id: "4k-256", version: 1, description: "4096-token prompt → 256 tokens",
+        id: "4k-256", version: 2, description: "4096-token prompt → 256 tokens",
         prompt: .filled(tokens: 4096, instruction: "\n\nSummarize the field notes above in detail.\n"),
         maxTokens: 256)
 
@@ -58,7 +61,7 @@ enum BenchWorkloads {
         case .filled(let target, let instruction):
             let tail = encode(instruction, false)
             var body = encode(document, true)
-            while body.count < target {   // never for w1 (~7K tokens), but stay exact if a tokenizer packs densely
+            while body.count < target {   // never for w1/w2 (~7K tokens), but stay exact if a tokenizer packs densely
                 body += encode(" " + document, false)
             }
             return Array(body.prefix(target - tail.count)) + tail

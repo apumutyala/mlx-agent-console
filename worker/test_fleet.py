@@ -342,53 +342,105 @@ class FleetTests(unittest.TestCase):
 
     # ------------------------------------------------------------- bench --
     @staticmethod
-    def receipt(model="lfm3-1.7b", decode=61.2, pad=0):
-        return {"schema": 1, "app_git_sha": "abc123", "created_at": "2026-11-26T10:00:00Z", "status": "ok",
+    def receipt(model="lfm3-1.7b", decode=61.2, pad=0, rid=None):
+        return {"schema": 1, "receipt_id": rid or secrets.token_hex(8), "app_git_sha": "abc123",
+                "created_at": "2026-11-26T10:00:00Z", "status": "ok",
                 "device": {"machine": "iPad17,3", "os": "iPadOS 27.2.1", "physical_memory_bytes": 16 << 30},
                 "model": {"id": model, "repo": "LiquidAI/LFM3-1.7B-MLX-4bit"},
-                "workload_set": "w1", "load": {"warm_load_s": 1.2},
+                "workload_set": "w1", "load": {"warm_load_s": 1.2, "junk": "x" * 5000},
                 "workloads": [{"id": "short-128", "prompt_tokens": 23, "output_hash": "deadbeef",
                                "deterministic": True,
                                "median": {"ttft_s": 0.05, "prefill_tps": 460.0, "decode_tps": decode,
                                           "peak_footprint_bytes": 1_400_000_000}}],
                 "padding": "x" * pad}
 
+    def post_receipt(self, body):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return self.c.call("POST", "/receipts", raw=raw)
+
     def test_receipts_post_list_get(self):
-        self.assertEqual(self.c.call("GET", "/receipts"), (200, {"receipts": []}))
-        st, a = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt()).encode())
+        self.assertEqual(self.c.call("GET", "/receipts"), (200, {"receipts": [], "more": False}))
+        st, a = self.post_receipt(self.receipt(decode=50.0))
         self.assertEqual(st, 201, a)
-        self.assertRegex(a["name"], r"^\d{8}T\d{6}Z-lfm3-1\.7b\.json$")
-        st, b = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(decode=70.0)).encode())
-        self.assertEqual(st, 201, b)
-        self.assertNotEqual(a["name"], b["name"])  # same second: suffixed, never overwritten
-        self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(model="../../qwen3")).encode())
+        self.assertRegex(a["name"], r"^\d{8}T\d{6}Z-\d{4}-lfm3-1\.7b\.json$")
+        names = [a["name"]]
+        for d in (60.0, 70.0):  # same second: never overwritten, still ordered newest first
+            st, b = self.post_receipt(self.receipt(decode=d))
+            self.assertEqual(st, 201, b)
+            names.append(b["name"])
+        self.assertEqual(len(set(names)), 3)
+        self.post_receipt(self.receipt(model="../../qwen3"))
         stored = sorted(p.name for p in (Path(self.tmp.name) / "receipts").iterdir())
-        self.assertEqual(len(stored), 3)
+        self.assertEqual(len(stored), 4)
         self.assertTrue(all("/" not in n and ".." not in n for n in stored))
         st, page = self.c.call("GET", "/receipts?model=lfm3-1.7b")
         self.assertEqual(st, 200)
-        self.assertEqual(len(page["receipts"]), 2)
+        self.assertEqual([r["workloads"][0]["decode_tps"] for r in page["receipts"]], [70.0, 60.0, 50.0])
         s = page["receipts"][0]
         self.assertEqual(s["model"]["id"], "lfm3-1.7b")
         self.assertEqual(s["device"]["machine"], "iPad17,3")
-        self.assertIn(s["workloads"][0]["decode_tps"], (61.2, 70.0))
         self.assertNotIn("padding", s)
-        self.assertEqual(len(self.c.call("GET", "/receipts?limit=1")[1]["receipts"]), 1)
+        self.assertNotIn("junk", s["load"])  # summaries are bounded to known fields
+        _, one = self.c.call("GET", "/receipts?limit=1")
+        self.assertEqual((len(one["receipts"]), one["more"]), (1, True))
         st, full = self.c.call("GET", f"/receipts/{a['name']}")
         self.assertEqual(st, 200)
-        self.assertEqual(full["workloads"][0]["median"]["decode_tps"], 61.2)
+        self.assertEqual(full["workloads"][0]["median"]["decode_tps"], 50.0)
         self.assertEqual(self.c.call("GET", "/receipts/..%2F..%2Fnodes.json")[0], 404)
-        self.assertEqual(self.c.call("GET", "/receipts/20261126T000000Z-nope.json")[0], 404)
+        self.assertEqual(self.c.call("GET", "/receipts/20261126T000000Z-0001-nope.json")[0], 404)
+        # a restarted worker rebuilds the same index from disk
+        again = federated.ReceiptStore(Path(self.tmp.name))
+        self.assertEqual([r["name"] for r in again.list()["receipts"]],
+                         [r["name"] for r in self.c.call("GET", "/receipts")[1]["receipts"]])
+
+    def test_receipts_dedupe_by_receipt_id(self):
+        body = self.receipt(rid="0f0f0f0f-aaaa")
+        st, a = self.post_receipt(body)
+        self.assertEqual(st, 201)
+        st, b = self.post_receipt(body)  # retry after an ambiguous failure
+        self.assertEqual(st, 200, b)
+        self.assertEqual((b["name"], b["duplicate"]), (a["name"], True))
+        self.assertEqual(len(self.c.call("GET", "/receipts")[1]["receipts"]), 1)
 
     def test_receipts_validation(self):
-        self.assertEqual(self.c.call("POST", "/receipts", raw=b"not json")[0], 400)
-        self.assertEqual(self.c.call("POST", "/receipts", raw=b"[1, 2]")[0], 400)
-        self.assertEqual(self.c.call("POST", "/receipts", raw=json.dumps({"schema": 2}).encode())[0], 400)
-        st, err = self.c.call("POST", "/receipts", raw=json.dumps(self.receipt(pad=300_000)).encode())
-        self.assertEqual(st, 413, err)
+        good = json.dumps(self.receipt())
+        bad = [b"not json", b"[1, 2]", json.dumps({"schema": 2}).encode(),
+               json.dumps({**self.receipt(), "workloads": 5}).encode(),
+               json.dumps({**self.receipt(), "workloads": [3]}).encode(),
+               json.dumps({**self.receipt(), "model": "m"}).encode(),
+               json.dumps({**self.receipt(), "model": {}}).encode(),
+               json.dumps({**self.receipt(), "workloads": [{"median": 1}]}).encode(),
+               good.encode("utf-16"),
+               b"\xef\xbb\xbf" + good.encode(),
+               good.replace('"decode_tps": 61.2', '"decode_tps": NaN').encode()]
+        for raw in bad:
+            self.assertEqual(self.post_receipt(raw)[0], 400, raw[:80])
         self.assertEqual(self.c.call("GET", "/receipts?limit=x")[0], 400)
-        self.assertEqual(self.c.call("GET", "/receipts")[1], {"receipts": []})
+        self.assertEqual(self.c.call("GET", "/receipts")[1], {"receipts": [], "more": False})
         self.assertEqual(Client(self.c.base, "nope").call("GET", "/receipts")[0], 401)
+
+    def test_receipt_too_large_is_refused_unread_and_closed(self):
+        import socket
+        host, port = self.server.server_address[:2]
+        with socket.create_connection((host, port), timeout=10) as s:
+            s.sendall((f"POST /receipts HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {self.token}\r\n"
+                       "Content-Type: application/json\r\nContent-Length: 2000000\r\n\r\n").encode())
+            data = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break  # closed: the unread body is never parsed as the next request
+                data += chunk
+        self.assertTrue(data.startswith(b"HTTP/1.1 413"), data[:100])
+
+    def test_unreadable_receipt_file_does_not_break_listing(self):
+        self.post_receipt(self.receipt())
+        d = Path(self.tmp.name) / "receipts"
+        (d / "20200101T000000Z-0001-broken.json").write_bytes(
+            b'{"schema": 1, "model": {"id": "m"}, "workloads": 5}')
+        page = federated.ReceiptStore(Path(self.tmp.name)).list()  # as after a worker restart
+        self.assertEqual(len(page["receipts"]), 1)
+        self.assertIn("20200101T000000Z-0001-broken.json", page["unreadable"][0])
 
     def test_bench_task_roundtrip(self):
         self.node("ipad-1")  # generate-only node never gets bench work

@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import SwiftUI
+import UIKit
 
 /// Receipts on disk: Application Support/receipts/<UTC stamp>-<model id>.json.
 enum ReceiptStore {
@@ -45,6 +47,19 @@ enum ReceiptStore {
             }
     }
 
+    private static let uploadedKey = "bench.uploadedReceipts"
+
+    static func isUploaded(_ name: String) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: uploadedKey) ?? []).contains(name)
+    }
+
+    static func markUploaded(_ name: String) {
+        var names = UserDefaults.standard.stringArray(forKey: uploadedKey) ?? []
+        guard !names.contains(name) else { return }
+        names.append(name)
+        UserDefaults.standard.set(Array(names.suffix(2000)), forKey: uploadedKey)
+    }
+
     /// POST to the worker's /receipts (worker/receipts.py). nil = not configured.
     static func upload(_ url: URL) async throws -> String? {
         guard let cfg = WorkerConfig.load() else { return nil }
@@ -67,6 +82,10 @@ enum ReceiptStore {
 /// Bench screen state: runs one model or the whole catalog, sequentially,
 /// holding the GPU gate (so chat, batches and fleet tasks wait), saving and
 /// uploading a receipt per model.
+///
+/// Foreground only: the idle timer is disabled while running, and leaving the
+/// foreground stops the run at the next decode step (Metal rejects background
+/// GPU work), saving the model in progress as an `aborted` receipt.
 @MainActor @Observable
 final class BenchCoordinator {
     private(set) var isRunning = false
@@ -77,12 +96,19 @@ final class BenchCoordinator {
 
     @ObservationIgnored private let backend: MLXBackend?
     @ObservationIgnored private let onModelUnloaded: @MainActor () -> Void
+    @ObservationIgnored private let releaseOtherModels: @MainActor () async -> Void
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let cancelFlag = CancelFlag()
+    @ObservationIgnored private var abortReason: String?
+    @ObservationIgnored private var idleTimerWasDisabled = false
+    @ObservationIgnored private var backgroundGrace: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var uploading = false
 
-    init(backend: MLXBackend?, onModelUnloaded: @escaping @MainActor () -> Void) {
+    init(backend: MLXBackend?, onModelUnloaded: @escaping @MainActor () -> Void,
+         releaseOtherModels: @escaping @MainActor () async -> Void = {}) {
         self.backend = backend
         self.onModelUnloaded = onModelUnloaded
+        self.releaseOtherModels = releaseOtherModels
     }
 
     var canRun: Bool { backend != nil && !isRunning }
@@ -92,27 +118,37 @@ final class BenchCoordinator {
     /// `entries` run in order; catalog entries added later (e.g. Inkling) are included automatically.
     func run(_ entries: [ModelCatalog.Entry], repetitions: Int) {
         guard let backend, !isRunning else { return }
+        guard UIApplication.shared.applicationState == .active else { return }
         isRunning = true
+        abortReason = nil
         cancelFlag.reset()
+        idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true   // auto-lock would background the app mid-run
         let flag = cancelFlag
         status = "Waiting for the model to be free"
         // Strong self: the coordinator lives as long as the app (AppModel).
         task = Task {
+            await releaseOtherModels()   // embedder etc.; takes the gate itself, so before ours
             await GPUGate.shared.acquire("benchmark")
             onModelUnloaded()   // drop the chat's session so its weights can actually be freed
             let count = entries.count
             for (i, entry) in entries.enumerated() {
                 if flag.isSet || Task.isCancelled { break }
                 let runner = BenchmarkRunner(backend: backend)
-                let receipt = await runner.run(
+                var receipt = await runner.run(
                     entry: entry, repetitions: repetitions,
                     progress: { [self] p in
                         Task { @MainActor in
+                            guard self.isRunning, !flag.isSet else { return }
                             self.status = "[\(i + 1)/\(count)] \(p.message)"
                             self.fraction = (Double(i) + p.fraction) / Double(count)
                         }
                     },
                     isCancelled: { flag.isSet })
+                if receipt.status == "cancelled", let reason = abortReason {
+                    receipt.status = "aborted"
+                    receipt.error = reason
+                }
                 await store(receipt)
             }
             await GPUGate.shared.release()
@@ -122,15 +158,38 @@ final class BenchCoordinator {
 
     func cancel() {
         cancelFlag.set()
-        status = "Stopping after the current rep…"
+        status = "Stopping after the current step…"
+    }
+
+    /// Called from the app's scene-phase handler. Leaving `.active` stops the run
+    /// before any more GPU work is submitted; a short background grace lets the
+    /// in-flight step finish and the receipt be saved.
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        guard isRunning, phase != .active, abortReason == nil else { return }
+        abortReason = "app left the foreground (\(phase == .background ? "background" : "inactive")) during the run"
+        cancelFlag.set()
+        status = "Aborting: the app left the foreground"
+        if backgroundGrace == .invalid {
+            backgroundGrace = UIApplication.shared.beginBackgroundTask(withName: "bench-abort") { [weak self] in
+                Task { @MainActor in self?.endBackgroundGrace() }
+            }
+        }
+    }
+
+    private func endBackgroundGrace() {
+        guard backgroundGrace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundGrace)
+        backgroundGrace = .invalid
     }
 
     private func finish() {
         isRunning = false
         task = nil
-        status = cancelFlag.isSet ? "Stopped" : "Done"
+        status = abortReason.map { "Aborted: \($0)" } ?? (cancelFlag.isSet ? "Stopped" : "Done")
         fraction = 0
+        UIApplication.shared.isIdleTimerDisabled = idleTimerWasDisabled
         onModelUnloaded()   // the chat reloads its model on the next message
+        endBackgroundGrace()
     }
 
     private func store(_ receipt: BenchReceipt) async {
@@ -146,9 +205,26 @@ final class BenchCoordinator {
     func upload(_ url: URL) async {
         let name = url.lastPathComponent
         do {
-            uploadStatus[name] = try await ReceiptStore.upload(url).map { "Uploaded as \($0)" } ?? "Worker not configured"
+            if let stored = try await ReceiptStore.upload(url) {
+                ReceiptStore.markUploaded(name)
+                uploadStatus[name] = "Uploaded as \(stored)"
+            } else {
+                uploadStatus[name] = "Worker not configured"
+            }
         } catch {
-            uploadStatus[name] = "Upload failed: \(error.localizedDescription)"
+            uploadStatus[name] = "Upload failed (retried when the Bench tab opens): \(error.localizedDescription)"
+        }
+    }
+
+    /// Retry receipts that never reached the worker. Safe to repeat: the worker
+    /// dedupes on receipt_id.
+    func uploadPending() async {
+        guard !uploading, !isRunning, WorkerConfig.load() != nil else { return }
+        uploading = true
+        defer { uploading = false }
+        for s in saved where !ReceiptStore.isUploaded(s.id) {
+            await upload(s.url)
+            if uploadStatus[s.id]?.hasPrefix("Upload failed") == true { break }   // worker unreachable
         }
     }
 }

@@ -30,7 +30,11 @@ final class AppModel {
         onModelChanged: { [unowned self] in self.agent.invalidateConversation() })
     lazy var bench = BenchCoordinator(
         backend: backend as? MLXBackend,
-        onModelUnloaded: { [unowned self] in self.agent.invalidateConversation() })
+        onModelUnloaded: { [unowned self] in
+            self.agent.invalidateConversation()
+            self.node.modelWasUnloadedByBenchmark()
+        },
+        releaseOtherModels: { [unowned self] in await self.memory.releaseForBenchmark() })
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
@@ -59,6 +63,7 @@ struct AgentConsoleApp: App {
             }
             AppModel.shared.memory.scenePhaseChanged(phase)
             AppModel.shared.node.scenePhaseChanged(phase)
+            AppModel.shared.bench.scenePhaseChanged(phase)   // abort a run before Metal work is refused
         }
     }
 }

@@ -53,9 +53,12 @@ struct ChatView: View {
             .conversationHistory(agent)   // saved chats (Memory/ConversationsView.swift)
             .task(id: selectedModelID) {
                 guard !(await backend.isLoaded) else { return }
+                // Under the gate: a benchmark (or fleet task) may own the GPU and memory right now.
+                await GPUGate.shared.acquire("chat load")
                 loadProgress = 0
                 try? await backend.load { p in Task { @MainActor in loadProgress = p } }
                 loadProgress = 1
+                await GPUGate.shared.release()
             }
             .alert("Allow this action?",
                    isPresented: Binding(get: { agent.pendingConfirmation != nil }, set: { _ in })) {

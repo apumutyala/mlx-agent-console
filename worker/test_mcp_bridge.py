@@ -327,6 +327,23 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(res["isError"])
         res, _ = self.tool("list_receipts", limit=0)
         self.assertTrue(res["isError"])
+        # Big receipts: every text block stays valid JSON with the untrusted-data note first.
+        reps = [{"index": i, "ttft_s": 0.1, "output_hash": "f" * 64, "thermal_before": "nominal" * 20}
+                for i in range(10)]
+        for k in range(12):
+            self.router.receipts.save(json.dumps({
+                "schema": 1, "model": {"id": "big", "repo": "r/big", "display_name": "B" * 120},
+                "skip_reason": "s" * 5000, "error": "e" * 5000,
+                "workloads": [{"id": f"w{j}", "reps": reps, "output_token_ids": list(range(64)),
+                               "output_preview": "p" * 300, "median": {"decode_tps": 1.0}}
+                              for j in range(30)]}).encode())
+        _, big = self.tool("list_receipts", model="big", limit=50)
+        res, _ = self.tool("list_receipts", receipt=big["receipts"][0]["name"])
+        for r in (self.tool("list_receipts", model="big", limit=50)[0], res):
+            text = r["content"][0]["text"]
+            parsed = json.loads(text)  # not clipped mid-JSON
+            self.assertEqual(next(iter(parsed)), "note")
+        self.assertTrue(json.loads(res["content"][0]["text"])["clipped"])
         # read-only: not rate limited as a write
         self.assertNotIn("list_receipts", mcp_bridge.WRITE_TOOLS)
 

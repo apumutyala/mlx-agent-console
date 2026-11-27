@@ -319,6 +319,15 @@ final class NodeService {
 
     // MARK: bench
 
+    /// A benchmark replaced the loaded model, so an applied federated adapter is gone
+    /// (FederatedTrainer notices by itself: it holds the converted container weakly).
+    func modelWasUnloadedByBenchmark() {
+        if adapterStatus?.hasPrefix("Using round") == true {
+            adapterStatus = "A benchmark reloaded the base model, so the federated adapter is no longer applied. "
+                + "Tap Use federated adapter to apply it again."
+        }
+    }
+
     private struct BenchPayload: Decodable {
         let modelId: String?
         let workloadIds: [String]?
@@ -343,6 +352,7 @@ final class NodeService {
         _ = try BenchWorkloads.workloads(ids: p.workloadIds)   // fail fast on an unknown id
         status = "Benchmarking \(entry.displayName)"
         onModelChanged()   // the runner unloads the chat model
+        modelWasUnloadedByBenchmark()
         let receipt = await BenchmarkRunner(backend: mlx).run(
             entry: entry, workloadIDs: p.workloadIds,
             repetitions: p.repetitions ?? BenchmarkRunner.defaultRepetitions,

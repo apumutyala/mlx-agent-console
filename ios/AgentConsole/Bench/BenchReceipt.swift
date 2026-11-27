@@ -13,6 +13,8 @@ struct BenchReceipt: Codable, Sendable, Identifiable {
     var status: String                   // ok | skipped | failed | cancelled
     var skipReason: String?
     var error: String?
+    /// Conditions that make this run's numbers less trustworthy (e.g. memory still held).
+    var warnings: [String]?
     var appGitSha: String
     var appVersion: String
     var library: Library
@@ -68,6 +70,8 @@ struct BenchReceipt: Codable, Sendable, Identifiable {
         var promptMode: String           // raw token ids, no chat template
         var stopTokens: String           // ignored: always decodes max_tokens
         var timing: String
+        /// Idle wait after unloading, before the footprint baseline (w2+).
+        var settleS: Double?
     }
 
     struct Load: Codable, Sendable {
@@ -114,6 +118,8 @@ struct BenchReceipt: Codable, Sendable, Identifiable {
         /// Index of the first stop token in the generated ids, if one appeared
         /// (decoding continues past it so every rep decodes `maxTokens`).
         var stopTokenIndex: Int?
+        /// Untimed warm-up decode at this workload's prompt length (w2+).
+        var warmupS: Double?
     }
 
     struct Rep: Codable, Sendable {

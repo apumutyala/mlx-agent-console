@@ -81,6 +81,7 @@ struct BenchView: View {
             }
             .refreshable { coordinator.refresh(); deviceRefresh = Date() }
             .onAppear { coordinator.refresh(); deviceRefresh = Date() }
+            .task { await coordinator.uploadPending() }   // receipts a failed upload left behind
         }
     }
 
