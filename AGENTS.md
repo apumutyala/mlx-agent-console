@@ -15,6 +15,7 @@ Read [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) first. It covers the goa
   2. Find it: `gh run list --branch <branch> -L 1`
   3. Wait for it: `gh run watch <id> --exit-status`
 - macOS minutes are expensive, so batch your fixes.
+- **GitHub API rate limit:** 5,000 requests per hour, shared by every agent. Always use `gh run watch <id> --interval 120 --exit-status`, or poll no more often than every 2–3 minutes; the default watch polls every 3 s. A watch that fails because of the rate limit does not mean the build failed, so check again after the reset (`gh api rate_limit`).
 - Keep `SWIFT_VERSION` 5.0. `MLXArray` is not `Sendable`, so serialize inside `container.perform`.
 
 ## PR body checklist
