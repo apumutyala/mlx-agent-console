@@ -21,7 +21,30 @@ Copied: `Libraries/`, `Package.swift`, `LICENSE`, `ACKNOWLEDGMENTS.md`. Not copi
    DSpark draft that a conversion's index places beside the weights (roman220220's
    `model-mtp.safetensors`) is neither read nor rejected by strict validation.
 
-### Kernel patches (`inkling-kernels`, labelled K so they don't collide with other branches' numbering)
+4. SSD expert streaming for mixture-of-experts models, off by default (`[agent-console patch C]`):
+   - `Libraries/MLXLMCommon/ExpertStreaming.swift` (new): the model-agnostic runtime. The
+     `experts.json` manifest, an `F_NOCACHE` `preadv` reader, the per-layer `ExpertSlotCache`,
+     counters and the optional routing trace. Public surface: `ExpertStreaming.options/snapshot()/...`.
+   - `Libraries/MLXLMCommon/ExpertStreaming+SwitchGLU.swift` (new): `StreamedSwitchGLU` and
+     `installStreamedSwitchGLU`, for models whose experts are a `SwitchGLU` (`switch_mlp`).
+   - `Libraries/MLXVLM/Models/Inkling2ExpertStreaming.swift` (new): a typealias shim that keeps the
+     Inkling names (`Inkling2ExpertStreaming = ExpertStreaming`, `Inkling2ExpertSlotCache`, ...).
+   - `Libraries/MLXVLM/Models/Inkling2.swift`: slot-sized expert tensors built from the manifest
+     in `prepareCheckpoint` (once, and only for the language-model checkpoint: the on-demand vision
+     load runs `prepareCheckpoint` again and must not reinstall slots); `Inkling2Experts.outputs/decode`
+     route through the slots (chunked when a call needs more experts than slots); prefill chunks and
+     the token iterator's next-step async evaluation are drained while streaming. A failed expert
+     read is recorded and thrown after the step instead of `fatalError`.
+   - `Libraries/MLXLLM/Models/LFM2MoE.swift`: `expertStreaming` property, `installExpertStreaming`
+     from `prepareCheckpoint`, and the `CheckpointLoadingHooks` extension (LFM2.5-8B-A1B streamed tiers).
+   - `Libraries/MLXLMCommon/Load.swift`: `CheckpointLoadingHooks` (the model sees its directory
+     before loading and can filter tensor names), so a streamed load never reads stacked experts.
+   Nothing changes unless `ExpertStreaming.options.enabled` is set and the model directory
+   has `experts.json` (or a trace URL is set, which only records routing).
+
+The code patches above are marked `[agent-console patch A/B/C]` in the source.
+
+### Kernel patches (`inkling-kernels`, labelled K)
 
 - **K1** `Libraries/MLXVLM/Models/Inkling2Kernels.swift`: 2- and 3-bit affine experts in the fused decode
    expert kernels. `inkling2_unit_dot` gains a 2-bit branch (16 codes in one `uint`) and a 3-bit branch
@@ -39,10 +62,10 @@ Copied: `Libraries/`, `Package.swift`, `LICENSE`, `ACKNOWLEDGMENTS.md`. Not copi
 
 K1's reference and tests are in `ios/tools/kernels/`: a NumPy port of the kernels whose test fails
 when the Metal source's SHA-256 changes, and `check_metal_kernels.py`, which compiles the generated
-Metal in CI. Patches A/B are marked `[agent-console patch A/B]` in the source.
+Metal in CI.
 
 ## Updating
 
-Re-copy the four items above from a newer PR head (or the release that merges it), re-apply the
+Re-copy the four copied items listed above from a newer PR head (or the release that merges it), re-apply the
 patches if still needed, and drop this directory in favour of a normal versioned package once
 Inkling 2 ships in an mlx-swift-lm release.

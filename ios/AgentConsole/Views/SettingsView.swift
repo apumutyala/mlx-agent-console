@@ -51,6 +51,7 @@ struct SettingsView: View {
                 SpeechSettingsSection()
                 MemorySettingsSection(memory: AppModel.shared.memory)
                 MemorySection(ignoreMemoryCheck: $ignoreMemoryCheck)
+                StreamingSection()
             }
             .navigationTitle("Settings")
             .sheet(isPresented: $scanning) {
@@ -153,6 +154,58 @@ private struct MemorySection: View {
                  + "Large models need their weights plus ~1.5 GB of it. “App limit” adds back what the "
                  + "loaded model holds. If it stays near half the RAM, the increased-memory-limit "
                  + "entitlement was not granted by the signing profile.")
+        }
+    }
+}
+
+/// Inkling SSD expert streaming: where streamed builds download from, the routing trace and the
+/// live counters (also available to benchmark receipts via `BenchMetricsRegistry`).
+private struct StreamingSection: View {
+    @AppStorage(StreamedModelStore.baseURLKey) private var baseURL = ""
+    @AppStorage(StreamingDiagnostics.traceKey) private var trace = false
+    @AppStorage(StreamingDiagnostics.greedyKey) private var greedy = false
+    @AppStorage(StreamingDiagnostics.exactPrefillKey) private var exactPrefill = false
+
+    static func rows() -> [(String, String)] {
+        let m = BenchMetricsRegistry.collect()
+        func v(_ key: String) -> Double? { m["expert_stream.\(key)"] }
+        guard let calls = v("moe_calls") else { return [("Counters", "no Inkling load yet")] }
+        var rows: [(String, String)] = [
+            ("Mode", v("streaming") == 1
+                ? "streaming \(Int(v("slots_per_layer") ?? 0))/\(Int(v("experts_per_layer") ?? 0)) per layer"
+                : "resident (trace only)"),
+            ("Forwards / MoE calls", "\(Int(v("forwards") ?? 0)) / \(Int(calls))"),
+        ]
+        if v("streaming") == 1 {
+            rows.append(("Hit rate", String(format: "%.1f%% (%d misses)", 100 * (v("hit_rate") ?? 0),
+                                            Int(v("misses") ?? 0))))
+            rows.append(("Read", String(format: "%@ in %.2f s (%.2f GB/s)", MemoryBudget.gb(Int(v("bytes_read") ?? 0)),
+                                        v("read_s") ?? 0, v("read_gb_per_s") ?? 0)))
+            rows.append(("GPU sync before writes", String(format: "%.2f s", v("gpu_sync_s") ?? 0)))
+        }
+        rows.append(("Routing wait", String(format: "%.2f s", v("route_wait_s") ?? 0)))
+        return rows
+    }
+
+    var body: some View {
+        Section {
+            TextField("Streamed models URL (blank = worker /models)", text: $baseURL)
+                .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                .font(.footnote)
+            Toggle("Record routing trace", isOn: $trace)
+            Toggle("Greedy decoding (correctness gate)", isOn: $greedy)
+            Toggle("Exact prefill, 3 tokens per step (gate)", isOn: $exactPrefill)
+            TimelineView(.periodic(from: .now, by: 2)) { _ in
+                MemoryReadout(rows: Self.rows())
+            }
+            Button("Reset counters") { BenchMetricsRegistry.resetAll() }.font(.caption)
+            if FileManager.default.fileExists(atPath: StreamingDiagnostics.traceURL.path) {
+                ShareLink("Share routing trace", item: StreamingDiagnostics.traceURL).font(.caption)
+            }
+        } header: { Text("MoE expert streaming (Inkling, LFM 8B)") } footer: {
+            Text("Streamed tiers keep part of the experts in memory and read the rest from storage. They download "
+                 + "once from your worker's models directory (see docs/INKLING-EXPERT-STREAMING.md). The trace "
+                 + "takes effect on the next Inkling load and writes the routed experts of every layer call.")
         }
     }
 }

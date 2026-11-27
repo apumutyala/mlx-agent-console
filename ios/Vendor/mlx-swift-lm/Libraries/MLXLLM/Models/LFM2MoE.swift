@@ -523,6 +523,9 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider,
 
     public let model: LFM2MoEModelInner
 
+    /// [agent-console patch C] The expert streaming (or routing trace) runtime of this load.
+    private var expertStreaming: ExpertStreamRuntime?
+
     public init(_ args: LFM2MoEConfiguration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
@@ -569,7 +572,60 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider,
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try LFM2RuntimeSupport.removingLanguageModelScope(from: checkpoint)
         checkpoint.weights = sanitize(weights: checkpoint.weights)
+        if let runtime = expertStreaming {
+            try installExpertStreaming(runtime: runtime, checkpoint: &checkpoint)
+        }
         return checkpoint
+    }
+
+    /// [agent-console patch C] Replaces each streamed layer's `switch_mlp` with a slot-sized
+    /// `StreamedSwitchGLU` (or, on a trace-only load, marks the resident one for tracing).
+    private func installExpertStreaming(
+        runtime: ExpertStreamRuntime, checkpoint: inout ModelCheckpoint
+    ) throws {
+        let args = configuration
+        guard let manifest = runtime.manifest else {
+            for (index, layer) in model.layers.enumerated() {
+                guard let block = layer.feedForward as? Lfm2MoeSparseMoeBlock else { continue }
+                let glu = StreamedSwitchGLU(
+                    inputDims: args.hiddenSize, hiddenDims: args.moeIntermediateSize,
+                    numExperts: args.numExperts, bias: false)
+                glu.stream = ExpertStreamLayer(layer: index, runtime: runtime, cache: nil)
+                try block.update(
+                    modules: ModuleChildren(values: ["switch_mlp": .value(glu)]), verify: .none)
+            }
+            return
+        }
+        guard manifest.experts == args.numExperts, manifest.hiddenSize == args.hiddenSize,
+            manifest.intermediateSize == args.moeIntermediateSize
+        else {
+            throw ExpertStreamingError.manifest(
+                "\(manifest.experts) experts of \(manifest.hiddenSize)x\(manifest.intermediateSize) "
+                    + "do not match the model config")
+        }
+        let capacity = runtime.capacity(experts: args.numExperts, topK: args.numExpertsPerToken)
+        let perLayer = checkpoint.perLayerQuantization
+        var weights = checkpoint.weights
+        let streamed = Set(manifest.layers.map(\.layer))
+        for (index, layer) in model.layers.enumerated()
+        where layer.feedForward is Lfm2MoeSparseMoeBlock && !streamed.contains(index) {
+            if weights["model.layers.\(index).feed_forward.switch_mlp.gate_proj.weight"] == nil {
+                throw ExpertStreamingError.manifest("layer \(index) has no experts anywhere")
+            }
+        }
+        for spec in manifest.layers {
+            guard spec.layer < model.layers.count,
+                let block = model.layers[spec.layer].feedForward as? Lfm2MoeSparseMoeBlock
+            else { throw ExpertStreamingError.manifest("layer \(spec.layer) is not an MoE layer") }
+            let path = "model.layers.\(spec.layer).feed_forward.switch_mlp"
+            let glu = try installStreamedSwitchGLU(
+                spec: spec, runtime: runtime, capacity: capacity, inputDims: args.hiddenSize,
+                hiddenDims: args.moeIntermediateSize, path: path,
+                quantization: { perLayer?.quantization(layer: $0) }, weights: &weights)
+            try block.update(
+                modules: ModuleChildren(values: ["switch_mlp": .value(glu)]), verify: .none)
+        }
+        checkpoint.weights = weights
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -630,6 +686,19 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider,
             fullAttentionIndices: Set(configuration.fullAttnIdxs),
             convolutionStateLength: configuration.convLCache - 1,
             parameters: parameters)
+    }
+}
+
+// [agent-console patch C] The loader asks the model which tensors to read.
+extension LFM2MoEModel: CheckpointLoadingHooks {
+    public func willLoadCheckpoint(from directory: URL) throws {
+        expertStreaming = try ExpertStreamRuntime.make(directory: directory)
+    }
+
+    /// A streamed load never reads the stacked experts, even when the directory still has them.
+    public var checkpointTensorFilter: (@Sendable (String) -> Bool)? {
+        guard expertStreaming?.streams == true else { return nil }
+        return { !$0.contains(".switch_mlp.") }
     }
 }
 

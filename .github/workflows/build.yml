@@ -22,7 +22,7 @@ jobs:
         working-directory: worker
         run: |
           pip install mcp
-          python -m unittest -v test_jobworker test_mcp_bridge test_fleet
+          python -m unittest -v test_jobworker test_mcp_bridge test_fleet test_models
 
       - name: Inkling expert kernel reference (numpy)
         if: hashFiles('ios/tools/kernels/test_inkling2_expert_ref.py') != ''
@@ -30,6 +30,12 @@ jobs:
         run: |
           pip install numpy
           python -m unittest -v test_inkling2_expert_ref
+
+      - name: Expert repack tests
+        working-directory: tools
+        run: |
+          pip install numpy
+          python -m unittest -v test_expert_repack test_expert_trace_sim
 
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.
