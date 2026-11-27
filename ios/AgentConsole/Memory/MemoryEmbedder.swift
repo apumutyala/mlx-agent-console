@@ -46,10 +46,16 @@ actor MemoryEmbedder {
         isLoading = true
         defer { isLoading = false }
         let started = generation
+        // Same store as the chat models (Application Support, local-first: no network
+        // call when the snapshot is complete on disk).
+        var configuration = EmbedderRegistry.lfm2_embedding_350m_4bit
+        let local = ModelStore.localSnapshot(repo: Self.modelID)
+        if let local { configuration.id = .directory(local) }
         let loaded = try await EmbedderModelFactory.shared.loadContainer(
-            from: #hubDownloader(),
+            from: #hubDownloader(ModelStore.hub),
             using: #huggingFaceTokenizerLoader(),
-            configuration: EmbedderRegistry.lfm2_embedding_350m_4bit)
+            configuration: configuration)
+        if local == nil { ModelStore.noteDownloaded(repo: Self.modelID) }
         try Task.checkCancellation()
         if generation == started { container = loaded }
     }

@@ -10,7 +10,7 @@ struct BenchReceipt: Codable, Sendable, Identifiable {
     var schema = 1
     var receiptId: String
     var createdAt: String                // ISO 8601, UTC
-    var status: String                   // ok | skipped | failed | cancelled
+    var status: String                   // ok | skipped | failed | cancelled | aborted | killed
     var skipReason: String?
     var error: String?
     /// Conditions that make this run's numbers less trustworthy (e.g. memory still held).
@@ -26,8 +26,68 @@ struct BenchReceipt: Codable, Sendable, Identifiable {
     var environment: Environment
     var workloads: [WorkloadResult]
     var totalWallS: Double
+    // Optional additions (still schema 1: old receipts decode, the worker ignores unknown keys).
+    /// Inference engine: "mlx" or "xybrid". nil in receipts from before engine-ab (all MLX).
+    var engine: String? = nil
+    /// Engine A/B protocol step (A1–A7) when the run came from the Bench tab's engine A/B.
+    var abStep: String? = nil
+    /// The app's bundle id and container identity, to prove weights survived a reinstall.
+    var identity: Identity? = nil
+    var memoryProbe: MemoryProbeResult? = nil
+    var storage: Storage? = nil
+    /// The process died during this run (found by `JetsamBreadcrumb` at the next launch).
+    var jetsamSuspected: Bool? = nil
+    /// The run bypassed the memory skip ("force try").
+    var forced: Bool? = nil
+    /// Engine-specific facts (Xybrid: source, GGUF path, residency setting, load time …).
+    var engineNotes: [String: String]? = nil
 
     var id: String { receiptId }
+
+    struct Identity: Codable, Sendable {
+        var bundleIdentifier: String
+        /// SHA-256 prefix of the data container path (may change on update; see the marker).
+        var containerPathHash: String
+        /// Random id written to Application Support on first launch; the same id after a
+        /// reinstall proves the container (and the weights in it) persisted.
+        var containerMarkerId: String
+        var containerMarkerCreatedAt: String
+
+        static var current: Identity {
+            let m = ContainerIdentity.marker
+            return Identity(bundleIdentifier: ContainerIdentity.bundleIdentifier,
+                            containerPathHash: ContainerIdentity.pathHash,
+                            containerMarkerId: m.id,
+                            containerMarkerCreatedAt: ISO8601DateFormatter().string(from: m.createdAt))
+        }
+    }
+
+    struct MemoryProbeResult: Codable, Sendable {
+        /// `os_proc_available_memory()` right before / after the (warm) load.
+        var availableBeforeLoadBytes: UInt64
+        var availableAfterLoadBytes: UInt64
+        /// Peak `task_vm_info.phys_footprint` over the whole run (load + every rep).
+        var physFootprintPeakBytes: UInt64
+        var physFootprintBeforeLoadBytes: UInt64
+        var physFootprintAfterLoadBytes: UInt64
+        /// `MTLDevice.recommendedMaxWorkingSetSize`.
+        var metalRecommendedMaxWorkingSetBytes: UInt64?
+        /// `MTLDevice.currentAllocatedSize` before load, after load, and the max seen after reps.
+        var metalAllocatedBeforeLoadBytes: UInt64?
+        var metalAllocatedAfterLoadBytes: UInt64?
+        var metalAllocatedMaxBytes: UInt64?
+    }
+
+    struct Storage: Codable, Sendable {
+        /// A complete local copy existed before the first load (so no download was needed).
+        var localSnapshotCompleteBefore: Bool
+        /// Bytes on disk for the model before / after the first load (any growth = download).
+        var bytesOnDiskBefore: Int64
+        var bytesOnDiskAfter: Int64
+        /// Where the weights live (`Application Support/Models/...`).
+        var path: String?
+        var excludedFromBackup: Bool
+    }
 
     struct Library: Codable, Sendable {
         var mlxSwiftLm: String

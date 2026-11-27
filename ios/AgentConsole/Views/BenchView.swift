@@ -8,6 +8,8 @@ struct BenchView: View {
     @State private var choice = BenchView.allModels
     @State private var repetitions = BenchmarkRunner.defaultRepetitions
     @State private var deviceRefresh = Date()
+    @State private var abSteps: Set<String> = Set(EngineAB.steps.map(\.id)).subtracting(["A7"])
+    @AppStorage(XybridLLMBackend.noResidencyNextLaunchKey) private var noResidencyNextLaunch = false
 
     static let allModels = "__all__"
 
@@ -57,6 +59,8 @@ struct BenchView: View {
                          + "Receipts upload to the worker when one is configured.")
                 }
 
+                engineABSection
+
                 Section {
                     if coordinator.saved.isEmpty {
                         Text("No receipts yet.").foregroundStyle(.secondary)
@@ -66,7 +70,7 @@ struct BenchView: View {
                             ReceiptDetailView(saved: s, coordinator: coordinator)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("\(s.receipt.model.displayName) · \(s.receipt.createdAt)").font(.subheadline)
+                                Text(Self.rowTitle(s.receipt)).font(.subheadline)
                                 Text(s.receipt.headline).font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -83,6 +87,58 @@ struct BenchView: View {
             .onAppear { coordinator.refresh(); deviceRefresh = Date() }
             .task { await coordinator.uploadPending() }   // receipts a failed upload left behind
         }
+    }
+
+    /// Engine A/B (A1–A7): what runs, in which order, and the A7 launch switch.
+    @ViewBuilder private var engineABSection: some View {
+        Section {
+            if let notice = coordinator.killedNotice {
+                Label(notice, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.orange)
+            }
+            ForEach(EngineAB.steps) { step in
+                Toggle(isOn: Binding(
+                    get: { abSteps.contains(step.id) },
+                    set: { on in if on { abSteps.insert(step.id) } else { abSteps.remove(step.id) } })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(step.title).font(.subheadline)
+                        Text(step.purpose + (step.entry.map { " · \($0.sizeLabel)" } ?? "")).font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(coordinator.isRunning)
+            }
+            Toggle("Disable Metal residency at next launch (A7, experimental)", isOn: $noResidencyNextLaunch)
+            if EngineAB.noResidencyActive {
+                Text("This launch has Metal residency OFF (GGML_METAL_NO_RESIDENCY=1): only A7 runs; "
+                     + "relaunch normally for the other steps.").font(.footnote).foregroundStyle(.orange)
+            }
+            if coordinator.isRunning {
+                ProgressView(value: coordinator.fraction)
+                Text(coordinator.status).font(.footnote)
+                Button("Stop", role: .destructive) { coordinator.cancel() }
+            } else {
+                Button("Run engine A/B (\(abSteps.count) steps)", systemImage: "arrow.left.arrow.right") {
+                    coordinator.runEngineAB(EngineAB.steps.filter { abSteps.contains($0.id) })
+                }
+                .disabled(!coordinator.canRunEngineAB || abSteps.isEmpty)
+            }
+        } header: { Text("Engine A/B: MLX vs Xybrid") } footer: {
+            Text("Same prompt (\(EngineAB.workloadID)), greedy, 256 tokens, \(EngineAB.repetitions) reps, median. "
+                 + "The first run downloads what is missing (up to ~23 GB for all steps: 5 GGUFs + 2 MLX models) into Application Support; "
+                 + "keep the app in the foreground and plugged in. A6 and A5 may be killed by iOS: that is the "
+                 + "data point, and the next launch saves a “killed” receipt. A7 needs its own launch: turn on "
+                 + "the residency switch, quit the app from the app switcher, reopen, select only A7 and run.")
+        }
+    }
+
+    /// "A2 · Xybrid · LFM2.5 8B-A1B · UD-Q3_K_XL · <date>" (engine/step only when recorded).
+    static func rowTitle(_ r: BenchReceipt) -> String {
+        var parts: [String] = []
+        if let step = r.abStep { parts.append(step) }
+        if let engine = r.engine { parts.append(engine == "xybrid" ? "Xybrid" : "MLX") }
+        parts.append(r.model.displayName)
+        parts.append(r.createdAt)
+        return parts.joined(separator: " · ")
     }
 
     static func gb(_ bytes: UInt64) -> String { String(format: "%.2f GB", Double(bytes) / 1e9) }
@@ -111,6 +167,37 @@ struct ReceiptDetailView: View {
                 LabeledContent("Device", value: "\(r.device.machine) · \(r.device.os)")
                 LabeledContent("Build", value: String(r.appGitSha.prefix(12)))
                 LabeledContent("Workload set", value: "\(r.workloadSet) · \(r.params.repetitions) reps")
+                if let e = r.engine { LabeledContent("Engine", value: e + (r.abStep.map { " · \($0)" } ?? "")) }
+                if r.jetsamSuspected == true { Text("Killed during the run: jetsam suspected.").font(.footnote).foregroundStyle(.red) }
+                if let w = r.warnings, !w.isEmpty { Text(w.joined(separator: "\n")).font(.footnote).foregroundStyle(.orange) }
+            }
+            if let m = r.memoryProbe {
+                Section("Memory") {
+                    LabeledContent("Peak footprint", value: BenchView.gb(m.physFootprintPeakBytes))
+                    LabeledContent("Available before → after load",
+                                   value: "\(BenchView.gb(m.availableBeforeLoadBytes)) → \(BenchView.gb(m.availableAfterLoadBytes))")
+                    if let w = m.metalRecommendedMaxWorkingSetBytes {
+                        LabeledContent("Metal working set (recommended)", value: BenchView.gb(w))
+                    }
+                    if let a = m.metalAllocatedAfterLoadBytes {
+                        LabeledContent("Metal allocated after load", value: BenchView.gb(a))
+                    }
+                }
+            }
+            if let s = r.storage {
+                Section("Storage") {
+                    LabeledContent("Local copy before load", value: s.localSnapshotCompleteBefore ? "complete" : "no")
+                    LabeledContent("On disk before → after",
+                                   value: "\(BenchView.gb(UInt64(max(0, s.bytesOnDiskBefore)))) → \(BenchView.gb(UInt64(max(0, s.bytesOnDiskAfter))))")
+                    LabeledContent("Excluded from backup", value: s.excludedFromBackup ? "yes" : "no")
+                }
+            }
+            if let id = r.identity {
+                Section("Container") {
+                    LabeledContent("Bundle id", value: id.bundleIdentifier)
+                    LabeledContent("Container marker", value: String(id.containerMarkerId.prefix(8)))
+                    LabeledContent("Path hash", value: id.containerPathHash)
+                }
             }
             if let l = r.load {
                 Section("Load") {

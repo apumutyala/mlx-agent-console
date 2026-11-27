@@ -50,6 +50,8 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | QR pairing (`worker/pair.ps1`) | not yet | no | VisionKit scanner |
 | Inkling 2 Mini | in progress | no | see findings below |
 | Memory harness + document tools | in progress | no | |
+| Model store (Application Support, local-first, migration, Downloaded models) | **compile-unverified** (`engine-ab`) | no | CI frozen until Dec 1 |
+| Xybrid LLM engine (opt-in) + engine A/B A1–A7 in Bench | **compile-unverified** (`engine-ab`) | no | CI frozen until Dec 1 |
 | Bench tab + receipts (`bench`) | see PR | no | worker `/receipts` + `list_receipts` tests pass |
 
 ## Findings
@@ -141,6 +143,31 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: `engine-ab`, model storage + Xybrid LLM engine + engine A/B (A1–A7), compile-unverified
+- **Base:** `integration-next` (b74c0e2) + `integration` (research doc, CI budget rule). PR into `integration`. **No CI run** (budget freeze): every API was checked against its source instead (Xybrid v0.21.0 at 491da33d; swift-huggingface 0.13.0 at f0a0cb43; the vendored mlx-swift-lm macros and `ModelFactory`).
+- **Storage (research §5, critique C6):**
+  - `Inference/ModelStore.swift`: one explicit `HubCache(cacheDirectory: Application Support/Models/huggingface/hub)` + `HubClient(cache:)`; every MLX download goes through `#hubDownloader(ModelStore.hub)` (chat LLM and VLM paths, memory embedder). `Models/` and `Xybrid/` are excluded from iCloud backup.
+  - One-time migration at launch: `Library/Caches/huggingface/hub` is moved (one rename when the destination is new; per-repo moves when both exist, duplicates left in place, nothing deleted). The file count and byte totals are compared before and after, and the report shows in Settings › Downloaded models.
+  - Local-first: when `refs/main` → snapshot has config.json, a tokenizer and every shard from the index, with sizes matching `Models/manifest.json`, the load uses `cfg.id = .directory(snapshot)`. The downloader is never called for the weights, so a load works in airplane mode with no network wait, and registry settings such as `toolCallFormat` are kept.
+  - Bench fix: `weight_files_bytes` now sums the symlink targets (the old 76 was the link length). Receipts gain `storage` (local copy before, bytes on disk before/after, backup flag).
+  - Every receipt records `identity`: the bundle id, a container path hash and a **container marker id**, a random id written to Application Support on first launch. iOS may move the container path on an update, so the marker, not the hash, proves persistence across Sideloadly reinstalls.
+  - Settings › Downloaded models lists MLX snapshots, GGUFs and the Xybrid SDK cache, with files, real sizes, free space and a confirmed delete. The selected model can't be deleted, and nothing can be deleted during a benchmark.
+  - Xybrid speech cache: it is already in Application Support (not purgeable); now excluded from backup. `initSdkCacheDir` is never called.
+- **Xybrid LLM engine (research §2):**
+  - `Inference/XybridLLMBackend.swift` covers a registry model (`lfm2.5-1.2b-instruct`, Q4_K_M) or a GGUF downloaded to `Models/gguf/<entry>/<file>` (exact size checked, moved into place only when complete) and loaded with `ModelLoader.fromModelFile`, with no network.
+  - Chat streams through `runStreamWithContext` + `XybridConversationContext` (turns pushed after the run, per Xybrid's executor contract), with native tools (`toolResults` continuation). Its limits: one tool round is rebuilt per continuation, and tool exchanges are not kept in later history.
+  - `Inference/EngineRouter.swift` is the app's `ModelBackend`. MLX is the default. `.xybrid` catalog entries are opt-in in the picker, labelled “· Xybrid”. Only one engine holds weights: an MLX load unloads Xybrid first, and selecting a Xybrid entry makes MLX drop its container. Loads stay under `GPUGate`. MLX-only code (LoRA, token counts, fleet bench) reaches MLX through `backend.mlxBackend`.
+  - Catalog (exact HF sizes): `LFM2.5-8B-A1B` UD-Q3_K_XL 4,003,114,592 B; UD-IQ4_XS 4,264,996,448 B; UD-IQ3_XXS 3,272,339,040 B (unsloth); Q4_0 4,844,678,368 B (LiquidAI, mmap canary). They are not in `ModelCatalog.all`, so MLX benchmark runs never try them.
+- **Engine A/B (Bench tab › “Engine A/B: MLX vs Xybrid”):**
+  - Steps: A1-mlx, A1-xybrid, A2, A3, A3-iq3xxs, A4 (a `skipped` receipt until an MLX 3-bit conversion exists, T4), A6, A7, A5. They use workload `ab-256`: the same text, greedy, 256 tokens, 5 reps, median.
+  - Every receipt has `engine`, `ab_step` and a `memory_probe`: `phys_footprint` peak over load + reps, `os_proc_available_memory` before/after load, and `MTLDevice.recommendedMaxWorkingSetSize` / `currentAllocatedSize` before/after/max.
+  - A **jetsam breadcrumb** is set before every benchmark load (MLX and Xybrid) and cleared when the run ends. If it is found at the next launch, the run is saved as `status: killed`, `jetsam_suspected: true`, with the last phase and memory readings.
+  - A5 = MLX 4-bit 8B with **force try** (Bench only), which bypasses the memory skip and records the bypass in `warnings`.
+  - A7 = A6 with `GGML_METAL_NO_RESIDENCY=1`. It is **experimental** and **armed for the next launch only**, because ggml reads the variable when it creates its Metal device; A6 refuses to run in that launch.
+  - The Xybrid side feeds the text through the GGUF chat template (there is no raw-token API) and may stop at end-of-turn. Receipts record the generated count, and a warning when it is under 256.
+- **Worker:** the `list_receipts` summary carries `engine`, `ab_step` and `jetsam_suspected`. +1 test; 60 worker tests pass locally.
+- **Status:** not compiled, nothing on a device. Unverified: whether swift-huggingface resolves to a version with `HubCache(cacheDirectory:)` (≥ 0.13 has it); whether `MTLDevice.currentAllocatedSize` from our own `MTLCreateSystemDefaultDevice()` reflects llama.cpp's and MLX's buffers; whether a free Apple ID can map a 4.8 GB file (critique C4, extended virtual addressing); Xybrid `tokens_in` metadata for text runs.
 
 ### 2026-11-27: `integration-next` — merged #7 + #2 on top of #6: unified load path
 - **What:** `integration-next` = `integration` (with #6 `fix-node`) + PR #7 `bench` + PR #2 `inkling2`, merged in that order. All three PRs' behaviours are kept; the decisions made in conflict resolution are below.

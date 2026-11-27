@@ -75,6 +75,20 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         }
     }
 
+    /// `configuration(for:)`, pointed at the local snapshot when ModelStore has a complete
+    /// one for the repo at `refs/main` (then the downloader is never called for the
+    /// weights, so the load works offline and never waits on the network). Only the model
+    /// source changes, so registry settings such as `toolCallFormat` are kept.
+    static func storeConfiguration(for entry: ModelCatalog.Entry) -> (ModelConfiguration, local: Bool) {
+        var cfg = configuration(for: entry)
+        if case .id(let repo, revision: let revision) = cfg.id, revision == "main",
+           let snapshot = ModelStore.localSnapshot(repo: repo) {
+            cfg.id = .directory(snapshot)
+            return (cfg, true)
+        }
+        return (cfg, false)
+    }
+
     /// Generation settings that bound memory for big models. The KV cache is deliberately
     /// *not* capped with `maxKVSize`: on Inkling that turns the global-attention layers into
     /// rotating caches that keep only 4 prefix tokens, silently evicting the system prompt and
@@ -221,12 +235,19 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
                 stillHeldBytes: MLX.Memory.activeMemory)
         }
 
+        guard target.engine == .mlx else { throw BackendError.wrongEngine(target.displayName) }
+
         switch target.loader {
         case .llm:
-            return try await #huggingFaceLoadModelContainer(
-                configuration: Self.configuration(for: target),
-                progress: .download { p in progress(p.fractionCompleted) }
-            )
+            // Local-first: a complete snapshot in ModelStore loads with no network call.
+            let (configuration, local) = Self.storeConfiguration(for: target)
+            let loaded = try await loadModelContainer(
+                from: #hubDownloader(ModelStore.hub),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: configuration,
+                progress: .download { p in progress(p.fractionCompleted) })
+            if !local { ModelStore.noteDownloaded(repo: target.repo) }
+            return loaded
         case .vlm:
             return try await loadLarge(target, epoch: loadEpoch, progress: progress)
         }
@@ -261,11 +282,13 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         let handlers = LoadProgressHandlers(
             download: { p in progress(0.9 * p.fractionCompleted) },
             weights: { p in progress(0.9 + 0.1 * p.fractionCompleted) })
+        let (configuration, local) = Self.storeConfiguration(for: target)
         let loaded = try await VLMModelFactory.shared.loadContainer(
-            from: #hubDownloader(),
+            from: #hubDownloader(ModelStore.hub),
             using: #huggingFaceTokenizerLoader(),
-            configuration: Self.configuration(for: target),
+            configuration: configuration,
             progress: handlers)
+        if !local { ModelStore.noteDownloaded(repo: target.repo) }
 
         if isCurrent(loadEpoch) {
             let snapshot = MemoryBudget.mlxSnapshot()
@@ -357,7 +380,14 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
 
     enum BackendError: LocalizedError {
         case notLoaded
-        var errorDescription: String? { "Model not loaded yet." }
+        /// The entry runs on another engine (Xybrid); `EngineRouter` routes it there.
+        case wrongEngine(String)
+        var errorDescription: String? {
+            switch self {
+            case .notLoaded: "Model not loaded yet."
+            case .wrongEngine(let name): "\(name) runs on the Xybrid engine, not MLX."
+            }
+        }
     }
 }
 
