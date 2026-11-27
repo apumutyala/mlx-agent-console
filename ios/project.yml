@@ -8,6 +8,11 @@ packages:
   MLXSwiftLM:
     url: https://github.com/ml-explore/mlx-swift-lm
     exactVersion: 3.33.0                # needs Swift 6.3 tools -> Xcode 26.4+
+  MLXSwift:
+    # Same package mlx-swift-lm 3.33.0 pins (.upToNextMinor(from: "0.33.0")),
+    # declared directly for MLXNN/MLXOptimizers (on-device LoRA training).
+    url: https://github.com/ml-explore/mlx-swift
+    minorVersion: 0.33.0
   SwiftHuggingFace:
     url: https://github.com/huggingface/swift-huggingface
     from: 0.9.0
@@ -27,6 +32,12 @@ targets:
         product: MLXLMCommon
       - package: MLXSwiftLM
         product: MLXHuggingFace
+      - package: MLXSwift
+        product: MLX
+      - package: MLXSwift
+        product: MLXNN
+      - package: MLXSwift
+        product: MLXOptimizers
       - package: SwiftHuggingFace
         product: HuggingFace
       - package: SwiftTransformers

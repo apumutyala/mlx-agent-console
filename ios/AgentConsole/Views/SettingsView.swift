@@ -28,6 +28,7 @@ struct SettingsView: View {
                     }
                 }
                 if let status { Text(status).font(.footnote) }
+                NodeSettingsSection(node: AppModel.shared.node)
                 Section {
                     Picker("Model", selection: $selectedModelID) {
                         ForEach(ModelCatalog.available) { entry in
