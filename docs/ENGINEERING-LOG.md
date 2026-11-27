@@ -151,6 +151,14 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 
 ## Log
 
+### 2026-11-27: lamq self-check round 3: digests pass on the iPad; the Hadamard "failure" is M5 TF32 (`lamq-fix`)
+- **Device (build 135cace):** every dequant digest, the LUT bytes and the bit-for-bit GPU-vs-scalar rows pass on layer 7 of the 5.4 GB build.
+- **The one failure is precision, not the matrix.** MLX runs float32 GEMMs on M5's neural accelerators at TF32 (`MLX_ENABLE_TF32` defaults to 1).
+  - Truncating-TF32 emulation reproduces the device numbers: round trip 5.1e-3 (device 5.18e-3); attention reference 7.3e-4 (device 6.5–8.5e-4).
+  - The Swift Hadamard factors are identical to LookAtMyQuant's.
+  - Diagnosis script: `ios/tools/lamq/rht_precision.py`.
+- **Fix (self-check only):** float32 gemv references, an exact host-side factor check, and a TF32-aware transform tolerance. No model change: TF32 rotation error (~7e-4) is below bf16 inter-layer rounding and on par with lamq's own f16 rotation.
+
 ### 2026-11-27: `integration-next2` — merged #8, #10 (with #9), #11, #12 on `integration`, review fixes
 - **Merge order:** `integration` → `inkling-kernels` (#8) → `lfm-moe-stream` (#10, brings #9) → `inkling-lamq` (#11) → `engine-ab` (#12). Every PR's behaviour is kept; the resolutions below are the decisions made.
 - **`MLXBackend` load path:** integration's unified path is unchanged (inline-in-caller load, draining, `MemoryBudget` gate, VLM routing, benchmark mode, epoch-tracked `loadLarge` with the token breadcrumb, `applyMemorySettings`). On top of it:

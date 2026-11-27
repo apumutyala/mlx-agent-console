@@ -43,6 +43,17 @@ public enum InklingLamqSelfCheck {
         public var seconds: Double = 0
     }
 
+    /// SHA-256 of the float32 bytes of `lamq_ref.hadamard_factors(n)` (A, B), which equal
+    /// LookAtMyQuant's (crosscheck_lamq_torch.py).
+    static let hadamardDigests: [String: String] = [
+        "2304A": "db4e69c0ebea12b9b1156126f040b5670ed3afca3521b57031e0d67f66523b74",
+        "2304B": "29375209b26bf9ceed6436a4723b2b94c4d6a59bdc8465e63955ea1d2b231447",
+        "1152A": "c9878e24c0071879714bf80810c2b6b055bdba51c8ce3d740509b69cb30b133b",
+        "1152B": "29375209b26bf9ceed6436a4723b2b94c4d6a59bdc8465e63955ea1d2b231447",
+        "3072A": "ea5a4b8435c281847845ea7bdd695e25e3e7c1f1e61ad938c4d405934b1fde97",
+        "3072B": "01756042c33b5aa1fd8e483a56bcecfefc7d03f98a6f3ad43b5232e1a5d47246",
+    ]
+
     static func sha256(_ a: MLXArray) -> String {
         let v = a.asType(.float32).asArray(Float.self)
         let digest = v.withUnsafeBytes { SHA256.hash(data: $0) }
@@ -117,19 +128,19 @@ public enum InklingLamqSelfCheck {
                 }
                 note(same, "\(name): GPU rows == scalar Swift decode, bit for bit")
             }
-            // Fused decode matvec vs dequant + matmul (float math: tolerance).
-            let x = MLXRandom.normal([2, lm.n])
-            let y = lin(x)
+            // Fused decode matvec vs dequant + matmul, on the SAME rotated input. The reference
+            // runs one row at a time: MLX sends M = 1 to its full-float32 gemv, whereas an M >= 2
+            // float32 GEMM runs at TF32 on M5 neural accelerators (MLX_ENABLE_TF32 defaults to 1),
+            // which is what made the first device run read ~7e-4 here (ios/tools/lamq/rht_precision.py).
             let si = try npz.array("lin_\(lm.safe)_signs_in").asType(.float32)
-            let rotIn = try InklingLamqRotation.of(lm.n)
-            var ref = matmul(rotIn.input(x, signs: si), q.transposed())
-            if lm.out_rot == true {
-                let rotOut = try InklingLamqRotation.of(lm.m)
-                let so = try npz.array("lin_\(lm.safe)_signs_out")
-                ref = rotOut.output(ref, signs: so)
-            }
+            let xRot = try InklingLamqRotation.of(lm.n).input(MLXRandom.normal([2, lm.n]), signs: si)
+            eval(xRot)
+            let y = lin.rotatedProduct(xRot)
+            let qT = q.transposed()
+            let ref = concatenated(
+                (0 ..< xRot.dim(0)).map { matmul(xRot[$0 ..< ($0 + 1)], qT) }, axis: 0)
             let err = (abs(y - ref).max() / (abs(ref).max() + 1e-12)).item(Float.self)
-            note(err < 1e-3, "\(name): fused matvec vs dequant+matmul, rel err \(err)")
+            note(err < 1e-5, "\(name): fused matvec vs dequant+gemv (f32), rel err \(err)")
         }
 
         // 3. Experts: assembled row groups, both sides. Besides `experts`, the first expert using
@@ -152,17 +163,50 @@ public enum InklingLamqSelfCheck {
                 let y = side.matvec(x, experts: MLXArray([Int32(e)]), xDiv: 1)
                 let ref = matmul(x, q.transposed())
                 let err = (abs(y - ref).max() / (abs(ref).max() + 1e-12)).item(Float.self)
-                note(err < 1e-3, "\(side.side) expert \(e): fused matvec vs dequant+matmul, rel err \(err)")
+                note(err < 1e-5, "\(side.side) expert \(e): fused matvec vs dequant+gemv (f32), rel err \(err)")
             }
         }
 
-        // 4. Rotation round trip: output(input(x, s), s) = x * s^2 (H H^T = n I).
+        // 4. Hadamard rotations.
+        // (a) Exact: the factors are the reference's (SHA-256 of their float32 bytes, from
+        //     lamq_ref.hadamard_factors == LookAtMyQuant's) and are Hadamard (M M^T = order I,
+        //     checked on the host in exact arithmetic).
+        for n in [2304, 1152, 3072] {
+            let (a, b) = try InklingLamqHadamard.factors(n)
+            for (label, m) in [("A", a), ("B", b)] {
+                let order = m.dim(0)
+                let v = m.asType(.float32).asArray(Float.self)
+                var hadamard = v.allSatisfy { $0 == 1 || $0 == -1 }
+                for i in 0 ..< order where hadamard {
+                    for j in 0 ..< order {
+                        var dot: Float = 0
+                        for k in 0 ..< order { dot += v[i * order + k] * v[j * order + k] }
+                        if dot != (i == j ? Float(order) : 0) { hadamard = false; break }
+                    }
+                }
+                let digestOK = Self.hadamardDigests["\(n)\(label)"].map { $0 == sha256(m) } ?? true
+                note(hadamard && digestOK, "Hadamard \(n) factor \(label) (\(order)x\(order)): exact, matches reference")
+            }
+        }
+        // (b) The transform on the GPU vs the explicit R = kron(A, B) diag(s) / sqrt(n) applied
+        //     through the full-float32 gemv. The two small factor matmuls are float32 GEMMs, which
+        //     M5 runs at TF32 (inputs truncated to 10 mantissa bits): expect ~7e-4 relative, and
+        //     ~1.5e-3 for the round trip (rht_precision.py reproduces the device's 5.2e-3 absolute).
+        //     A wrong matrix, order or normalisation gives errors of order 1e-1 and up, so 1e-2
+        //     separates the two. lamq's own runtime rounds rotated activations to float16 (~5e-4).
         let rot = try InklingLamqRotation.of(2304)
         let s = try npz.array("gu_signs_in").asType(.float32)
         let x = MLXRandom.normal([1, 2304])
-        let back = rot.output(rot.input(x, signs: s), signs: s)
-        let err = abs(back - x * s * s).max().item(Float.self)
-        note(err < 1e-4, "Hadamard 2304 (32x72) round trip, max err \(err)")
+        let (a, b) = try InklingLamqHadamard.factors(2304)
+        let h = (a.reshaped(32, 1, 32, 1) * b.reshaped(1, 72, 1, 72)).reshaped(2304, 2304)
+        let exact = matmul(x * s, h.transposed()) * (1 / Float(2304).squareRoot())
+        let y = rot.input(x, signs: s)
+        let transformErr = (abs(y - exact).max() / abs(exact).max()).item(Float.self)
+        note(transformErr < 1e-2, "Hadamard 2304 transform vs explicit kron (gemv f32), rel err \(transformErr) (TF32 ~7e-4)")
+        let back = rot.output(y, signs: s)
+        let want = x * s * s
+        let roundTrip = (abs(back - want).max() / abs(want).max()).item(Float.self)
+        note(roundTrip < 1e-2, "Hadamard 2304 round trip, rel err \(roundTrip) (TF32 ~1.5e-3)")
 
         r.seconds = Date().timeIntervalSince(start)
         r.lines.append(String(format: "%@ in %.1f s (%@@%@, layer %d)", r.passed ? "ALL PASS" : "FAILED", r.seconds,
