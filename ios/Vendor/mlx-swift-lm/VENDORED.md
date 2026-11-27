@@ -21,7 +21,21 @@ Copied: `Libraries/`, `Package.swift`, `LICENSE`, `ACKNOWLEDGMENTS.md`. Not copi
    DSpark draft that a conversion's index places beside the weights (roman220220's
    `model-mtp.safetensors`) is neither read nor rejected by strict validation.
 
-Both code patches are marked `[agent-console patch A/B]` in the source.
+4. `Libraries/MLXVLM/Models/Inkling2Kernels.swift`: 2- and 3-bit affine experts in the fused decode
+   expert kernels. `inkling2_unit_dot` gains a 2-bit branch (16 codes in one `uint`) and a 3-bit branch
+   (two 24-bit packs of 8 codes, read bytewise because the 6-byte unit is only 2-byte aligned), in
+   MLX's affine layout (mlx `quantize`, codes from the lowest bit up). `supportsFusedDecode` accepts
+   bits 2/3/4/8 for affine (fp modes stay 4/8). Kernel signatures, grid and indexing are unchanged; the
+   bit width is still a template argument per projection, so gate/up and down may differ. Self-contained
+   and in the PR's style, so it can be proposed upstream once measured.
+5. `Libraries/MLXVLM/Models/Inkling2KernelSelfCheck.swift` (new, local only): `Inkling2KernelSelfCheck`
+   runs the fused kernels and the unfused `gatherQuantizedMM` path on a random layer per format and
+   reports the differences; the app runs it from a Settings toggle.
+
+Patches A/B are marked `[agent-console patch A/B]` in the source and C (the self-check file) in its
+header. The kernel change (4) is not marked inline, to keep the diff upstreamable; its reference and
+tests are in `ios/tools/kernels/` (NumPy port of the kernels, `check_metal_kernels.py` compiles the
+generated Metal in CI).
 
 ## Updating
 

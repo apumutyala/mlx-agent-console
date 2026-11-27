@@ -26,6 +26,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `ios-node` | iPad compute node, federated LoRA trainer, GPU gate | `fleet` | merged into `integration` (CI green 45949683774) |
 | `xybrid-speech` | Xybrid Whisper STT + Kokoro TTS | `fleet` | merged into `integration` (CI green 45948595221) |
 | `inkling2` | Inkling 2 Mini via vendored mlx-swift-lm PR #821 + Fix A | `integration` | PR open, CI pending |
+| `inkling-kernels` | O2: 2/3-bit affine in Inkling's fused decode expert kernels; Metal compile check in CI | `inkling2` | PR open (depends on PR #2) |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
 
 **Rules for agents:**
@@ -87,7 +88,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | # | Item | Expected lever | Status |
 |---|---|---|---|
 | O1 | Measure tok/s, TTFT and peak memory per model on the iPad (in-app benchmark screen, receipts saved to the log) | baseline for everything below | todo |
-| O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | todo; upstream candidate |
+| O2 | Add 2/3-bit branches to Inkling's fused expert kernel (`inkling2_unit_dot`) | large (2/3-bit experts currently unfused) | PR from `inkling-kernels`; device A/B pending; upstream candidate |
 | O3 | Inkling expert streaming / mmap of routed experts | fits 8–12 GB devices, frees RAM | research |
 | O4 | KV cache quantization / smaller prefill step on iPad | memory headroom, longer context | todo |
 | O5 | Speculative / MTP heads (DSpark for LFM2, Inkling MTP builds) | decode speed | not in scope for the Trainium work; allowed here, pending a decision |
@@ -102,6 +103,14 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27 (later): O2, 2/3-bit fused expert kernels (`inkling-kernels`)
+- **Change:** `inkling2_unit_dot` reads 2-bit (16 codes per `uint`) and 3-bit (8 codes per 3 bytes) MLX affine weights; `supportsFusedDecode` accepts affine 2/3/4/8. The default DWQ build (gate/up 2-bit ×22 + 3-bit ×2 layers, down 2-bit ×14 + 3-bit ×10, all group 64; read from its config.json) now decodes through the fused kernels instead of `gatherQuantizedMM` + epilogue. Signatures and indexing unchanged (safe for `inkling-stream`'s slot tensors).
+- **Packing verified** against mlx@36969c0 (the mlx in mlx-swift 0.33.0): CPU `quantize` packs 3-bit as 8 values into 24 bits little-endian (`bytes_per_pack` 3), Metal `qdot` reads the same; 2-bit four per byte.
+- **Verified locally:** `ios/tools/kernels/test_inkling2_expert_ref.py` (numpy): hand-packed bytes, a port of MLX `quantize`, and a line-by-line port of both kernels against the dense math for gate/up×down bits {2,3}×{2,3}, 4, 8 and groups 64/128; a mutated 3-bit offset fails it. Runs in CI (`worker-tests`).
+- **New CI step:** `ios/tools/kernels/check_metal_kernels.py` regenerates the Metal source MLX builds for `MLXFast.metalKernel` (header, signature, template instantiation) and compiles it with `xcrun metal` against MLX's `utils.h`: 122 instantiations of the three expert kernels. Add specs to cover other runtime kernels.
+- **Device self-check:** Settings → Memory → "Inkling kernel self-check on load" runs fused vs unfused on a random Mini-shaped layer for each format before the weights load and shows max |Δ| per case.
+- **Not verified:** nothing ran on the iPad: speed and greedy equivalence need the A/B in the PR.
 
 ### 2026-11-27
 - **Inkling 2 (`inkling2` → PR into `integration`):** vendored aleroot/mlx-swift-lm@5507b3b (PR #821) under `ios/Vendor/mlx-swift-lm` without tests; Fix A (per-layer quantization keys renamed with the `model.` strip) and a DSpark-namespace exclusion. Fix B (mlx-vlm layout remap) deferred: that layout renames/reparametrizes ~30 tensors per layer (`q_scale`/`rel_scale`/`rel_proj`, `controllers.*`, `message_queries`) and LayerFit-2bit mixes gate 3-bit with up 2-bit, so gate/up can't be fused losslessly into `gate_up_proj`; not verifiable without weights.
