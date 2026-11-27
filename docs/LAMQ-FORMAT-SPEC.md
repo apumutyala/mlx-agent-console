@@ -3,7 +3,8 @@
 Status: 2026-11-27, branch `inkling-lamq`.
 - The spec below is verified bit-for-bit against LookAtMyQuant's own decoders on real files.
 - The Metal kernels are written but not yet compiled (CI freeze) and have not run on a device.
-- The model is not wired into the Swift Inkling 2 forward pass yet (see "What is left").
+- **The 3.9 GB build is wired into PR #821's Inkling 2 forward pass and is pickable** (fully resident). This is compile-unverified; see §8a.
+- The 4.7 and 5.4 GB builds wait on PR #9's slot cache (§11).
 
 ## Sources and licences
 
@@ -181,7 +182,61 @@ It holds 499 tensors with HF-transformers names (`model.layers.N.…`): everythi
 
 lamq loads them into `transformers.Inkling2LoopForCausalLM` with the packed modules substituted (`runtime_cuda/inkling/reference.py`).
 
-**This is not the layout `Inkling2.swift` (mlx-swift-lm PR #821) loads.** That code takes Thinking Machines' `model.llm.*` names or mlx-lm's converted layout (`r_proj`, `gate_proj`, `k_sconv`, …). A name and reparametrisation map from HF names to the PR #821 module tree is required. This is the same class of work as the deferred "Fix B".
+**This is not the layout `Inkling2.swift` (mlx-swift-lm PR #821) loads.** That code takes Thinking Machines' `model.llm.*` names or its converted layout (`r_proj`, `gate_proj`, `k_sconv`, …). §8a gives the map.
+
+## 8a. Steering → PR #821 map and wiring (patch D)
+
+The map is a pure rename plus one transpose, with no reparametrisation. Comparing lamq's own forward (`runtime_mlx/inkling/model.py`, `PackedDecoderLayer.__call__`) with PR #821 term by term confirms the same math for each tensor:
+
+| Term | lamq forward | PR #821 |
+|---|---|---|
+| q clip | `l2_clip(q · q_scale, τ)` | `Inkling2ScaledL2Clip.scale` |
+| rel clip | `l2_clip(rel · rel_scale, τ)` | `rel_l2_clip` |
+| rel logits | `rel @ rel_proj [16, 1024]` | `rel_logits_proj` |
+| sinks | `q_in @ sink_w.T` | `sink_proj` |
+| short convs | `[C,1,K]` conv weights | `[C,K,1]` conv weights |
+| message gates | `(1 − tanh(f)) h + tanh(g) m` on RMS-normed `[h, m]` | same formula |
+| messages order | `message_input.query[layer]` → (q, k, v, mlp) | same order |
+| attention-residual queries | `[D]` sliding / `[3, D]` full | same shapes |
+
+| steering (HF) | PR #821 |
+|---|---|
+| `model.embed_tokens.embed_norm.weight` | `language_model.embed_norm.weight` |
+| `model.{norm.weight, final_input.query, message_input.query}` | `language_model.…` (same) |
+| `model.layers.N.self_attn.q_proj.norm.scale` | `….self_attn.q_l2_clip.scale` |
+| `….self_attn.relative_position_bias.norm.scale` | `….self_attn.rel_l2_clip.scale` |
+| `….self_attn.relative_position_bias.proj` | `….self_attn.rel_logits_proj.proj` |
+| `….self_attn.{k,v}_proj.sconv.{conv1d.weight, static_weight, weight_proj.weight}` | `….self_attn.{k,v}_sconv.…` |
+| `….*.conv1d.weight` `[C,1,K]` f32 | swapped to `[C,K,1]`, **rounded to bf16**. PR #821's decode epilogue reads `const device T* conv_weight` with T = bf16. |
+| everything else under `model.layers.N.` | same name |
+
+**Packed parts replace PR #821 modules in `Inkling2.prepareCheckpoint`:**
+
+| lamq | PR #821 module | Replacement |
+|---|---|---|
+| `self_attn.q_proj.linear` | `q_proj` | `InklingLamqLinearLayer: Linear` (placeholder weight `[m, 0]`) |
+| `self_attn.k_proj.linear` | `k_proj` | same |
+| `self_attn.v_proj.linear` | `v_proj` | same |
+| `self_attn.relative_position_bias.linear` | `r_proj` | same |
+| `self_attn.o_proj.gate_proj` | `gate_proj` | same |
+| `self_attn.o_proj.linear` | `o_proj` | same |
+| experts `gu`/`dn` | `mlp.experts` (made optional) | removed; `Inkling2SparseMoE` routes to `lamqExperts` |
+| embed buckets | `embed_tokens` | `InklingLamqEmbeddingLayer: Embedding` |
+| head buckets | `lm_head` | `InklingLamqHeadLayer: Linear` (logits over the 200,058 unpadded rows) |
+
+**How the experts run in each path:**
+- Decode (`Inkling2SparseMoE.decode`): fused per-slot matvecs, then PR #821's own `inkling2ExpertEpilogue` (weighted sum, post-MLP convolution, residual).
+- Prefill and `callAsFunction`: lamq experts combine first, then PR #821's convolution fallback.
+
+**Loading:**
+- `VLMModelFactory._load` hands the directory to the model when `manifest.json` says `inkling2-packed-v1…`.
+- The only safetensors file is `steering.safetensors`. After the map plus 146 placeholders, the factory's **strict** update (`verify: .all`) checks every remaining parameter.
+- `ios/tools/lamq/test_steering_map.py` ports the map and PR #821's parameter tree. Against the real 3.9 GB steering header it finds **0 missing, 0 extra, 0 shape mismatches** over 645 entries.
+- The fused-projection fast path is ineligible, since it requires exact `QuantizedLinear`, so PR #821's unfused path runs.
+
+**App side:**
+- `ModelCatalog.inkling2MiniLamq39`: pinned revision, `residentGB` 3.85, `headroomGB` 0.9, 4K context, 512-token prefill steps. `MemoryBudget.fit` and the benchmark skip now take a per-entry headroom.
+- `MLXBackend.loadLarge` downloads the pinned snapshot with `*.npz` (the factory's patterns omit it), then loads it from the directory.
 
 ## 9. How the iPad build consumes it (this branch)
 
@@ -207,7 +262,8 @@ lamq loads them into `transformers.Inkling2LoopForCausalLM` with the packed modu
 - `InklingLamqFormat.swift`: formats, Hadamard/RHT, STORED-npz `pread` reader, metas.
 - `InklingLamqModules.swift`: packed linear, experts, embedding/head buckets.
 - `InklingLamqSelfCheck.swift` + generated `InklingLamqDigests.swift`.
-- App: `ModelCatalog.lamqBuilds`, `LamqSelfCheck.swift`, `LamqSettingsSection.swift`.
+- `InklingLamqModel.swift`: steering map, `Linear`/`Embedding` subclasses, directory detection. Patch D in `Inkling2.swift` and `VLMModelFactory.swift`.
+- App: `ModelCatalog.inkling2MiniLamq39` / `lamqBuilds`, `MLXBackend.loadLarge`, `LamqSelfCheck.swift`, `LamqSettingsSection.swift`.
 
 **Prefill caveat:** the expert path dequantizes each routed expert's tiles, about 16 MB of f16 writes per expert per visit. It is correct but likely slow (TTFT). A grouped kernel that reads an expert once for all its tokens (lamq's `trellis_moe_grouped`) is the obvious next step, after a profile.
 
@@ -247,12 +303,23 @@ lamq's own figure on an M5 Max is 6.41 GB peak for 5.34 GB active including a 17
 
 PR #9 (`inkling-stream`) keeps `S` slots inside each layer's expert tensors and `preadv`s misses from `experts.bin`. A lamq expert is 36 row-group slab entries in up to 3 formats per side, so its bytes are not one record.
 
-The adapter (not built yet) works like this:
-1. Give each layer's slot pool per-format slab tensors sized for `S` experts × (row groups of that format). Map row groups to slot entries in a remapped `sel`.
-2. Read misses directly from the STORED npz payloads with `pread`. The offsets come from the ZIP local headers, so no repack and no second copy on disk.
-3. Reuse PR #9's slot bookkeeping (LRU per physical layer, revisit hits across the 3 loop passes, GPU sync before overwrite) and its statistics and trace.
+The 4.7 and 5.4 GB builds are held until the PR #9 owner agrees an interface. PR #9 is not forked.
 
-This needs PR #9's API to accept heterogeneous per-format slab records. That change is to be agreed with the PR #9 owner; PR #9 is not forked.
+**What lamq needs from the slot cache.** Bookkeeping stays PR #9's: LRU per physical layer, revisits across the 3 loop passes, GPU sync before overwrite, statistics and trace. Only the record shape and the reader generalise.
+
+1. **Records made of parts.**
+   - A lamq expert is up to 36 slab entries (18 row groups × gu/dn). Each entry lives in a per-format slab, with codes `[128, n·k/32]` u32 plus scales `[128]` f16.
+   - Interface: `struct ExpertRecordPart { side; format: Int; rowGroup: Int; codes: (file: URL, offset: UInt64, bytes: Int); scales: (file, offset, bytes) }`, and `records(layer:expert:) -> [ExpertRecordPart]`.
+   - lamq computes the offsets from the STORED npz headers (`InklingLamqNpz.entries`): `payload + loc · entryBytes`.
+2. **Slot storage per (layer, side, format).**
+   - The pool owns one MLX slab per format, sized `S × maxEntriesPerExpert(format)`, where the maximum is over that layer's experts (often 18 for a single format; layers are usually uniform per side).
+   - It also needs a raw writable pointer to a slab entry (or `preadv` straight into it), as PR #9 already does for `[S, out, packed]`.
+3. **Remapped selection.**
+   - `slots(for ids: [Int]) -> [Int]`, plus the misses to fill. That is the existing call.
+   - lamq then builds `sel[slot, rg] = slotEntry(slot, rg)` on the host from `rg_map` and the slot's base. The kernels are unchanged: `sel` already indexes slab entries.
+4. **Prefill.** `ub × top-k ≤ slots` still bounds micro-batches. lamq's prefill path dequantizes per expert, so each expert can be filled, used and released within a step.
+
+Budget: 4.7 GB needs ≈ 0.6 GB streamed (S ≈ 110 of 128 experts per layer); 5.4 GB needs ≈ 1.3 GB (S ≈ 95).
 
 ## 12. Verification on this branch
 
@@ -262,12 +329,15 @@ This needs PR #9's API to accept heterogeneous per-format slab records. That cha
 | Spec oracles | `test_lamq_ref.py`: big-integer bitstream oracle, Metal index-math emulation (dequant, matvec, lm), hash, lm6 packing, E4M3 table, Hadamard identities, npz `pread` offsets; with `LAMQ_PACKED_DIR`, it re-derives the recorded digests | 19/19 pass locally, including the real-file test |
 | Metal compiles | `ios/tools/kernels/check_lamq_metal_kernels.py --compile` (156 instantiations) in CI | sources generate locally; **compile not run (CI freeze)** |
 | Metal == reference on device | Settings › Inkling 2 Mini · LookAtMyQuant › self-check. It downloads `layer_07_packed.npz` + meta + `luts.npz` (≈ 190 MB); layer 7 uses every layer format of the build. It checks the LUT bytes, GPU-dequantizes all 6 linears and the experts covering every format, and compares SHA-256 with the digests above. It also checks 4 rows per linear against a scalar Swift decode (bit for bit), fused matvec against dequant+matmul, and the Hadamard round trip. | **not run** |
-| End-to-end generation | needs the wiring below | not possible yet |
+| Steering map + strict-update coverage | `test_steering_map.py`: literal port of the Swift map and PR #821's parameter tree vs the real 3.9 GB steering header | 0 missing / 0 extra / 0 shape mismatches (4 tests pass) |
+| 3.9 GB formats in the bit-exact check | 3.9 GB layer 0 + all 8 head buckets via `crosscheck_lamq_torch.py` | RESULT_39 |
+| End-to-end generation (3.9 GB) | wired; needs a build and the device | **not run**: compile-unverified, no greedy-agreement gate yet |
 
 ## What is left (in order)
 
-1. **Compile.** Add the Metal check to CI and compile once, after the CI freeze lifts.
+1. **Compile.** The coordinator build compiles the Swift and the 156 Metal instantiations.
 2. **Device self-check.** Run it on the iPad. The SHA-256 digests must match.
-3. **Wiring.** Write the HF→PR #821 steering name/reparametrisation map. Then make the packed modules replace `Linear`/experts/embedding/head in `Inkling2.swift`, and gate the result on greedy-token agreement with lamq's CPU reference (`runtime_cuda.inkling.reference`, run on a rented box: it needs transformers from git plus about 20 GB RAM).
-4. **3.9 GB resident run** and receipts: tok/s, TTFT, peak.
-5. **Slot-cache adapter** for 4.7 and 5.4 GB.
+3. **3.9 GB chat** on the iPad, then receipts: tok/s, TTFT, peak footprint at 1K/4K.
+4. **Correctness gate.** Greedy-token agreement against lamq's CPU reference (`runtime_cuda.inkling.reference` on a rented box: it needs transformers from git plus about 20 GB RAM) on fixed prompts. Until then, "it answers sensibly" is the only end-to-end signal.
+5. **Prefill speed.** Profile it, then add a grouped expert kernel.
+6. **Slot-cache adapter** for 4.7 and 5.4 GB, once PR #9's interface is agreed (§11).

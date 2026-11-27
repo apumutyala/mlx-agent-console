@@ -29,7 +29,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
 | `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
-| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check | `inkling2` | PR #11 open; compile-unverified (CI freeze) |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check, 3.9 GB wired + pickable | `inkling2` | PR #11 open; compile-unverified (CI freeze) |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -142,6 +142,18 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | ml-explore/mlx-swift-lm | 2/3-bit fused expert kernel | Before/after tok/s with the same output (greedy match) | after O1/O2 |
 
 ## Log
+
+### 2026-11-27: lamq 3.9 GB wired into Inkling 2 and pickable (`inkling-lamq`, PR #11 update)
+- **Wiring (patch D, compile-unverified):**
+  - `steering.safetensors` is mapped onto PR #821's layout. It is a pure rename plus a `[C,1,K]`→`[C,K,1]` conv transpose (conv weights rounded to bf16 for PR #821's epilogue kernel). lamq's forward was compared with PR #821 term by term: no reparametrisation.
+  - The 6 attention linears per layer, the embedding and the head are `Linear`/`Embedding` subclasses with `[rows, 0]` placeholders, so the factory's strict update still checks every other parameter.
+  - Experts: `mlp.experts` is now optional. Decode runs fused matvecs plus PR #821's epilogue; prefill runs per-expert f16 tiles.
+  - `VLMModelFactory` hands the directory to the model when `manifest.json` is lamq.
+- **Verified locally:** `test_steering_map.py` ports the Swift map and PR #821's parameter tree. Against the real 3.9 GB steering header: 0 missing, 0 extra, 0 shape mismatches over 645 entries.
+- **App:**
+  - New entry `inkling2-mini-lamq-3.9`: pinned revision, `.npz` download, 0.9 GB headroom, 4K context. The memory gate and benchmark skip take a per-entry headroom: needs ≈ 4.75 GB of the ≈ 5.2 GB available.
+  - 4.7 and 5.4 GB are held for the PR #9 interface (spec §11).
+- **Not run:** compile, device self-check, chat, and a greedy-agreement gate against lamq's CPU reference.
 
 ### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, [PR #11](https://github.com/apumutyala/mlx-agent-console/pull/11), depends on `inkling2`)
 - **Spec:** `docs/LAMQ-FORMAT-SPEC.md` covers trellis `ht*`/`rtr*` (12-bit sliding state over a reversed little-endian row bitstream, ht = Fibonacci hash into 512/1024-entry f16 LUTs), Lloyd-Max `lm6`/`lm8`, NVFP4, Kronecker Sylvester×Paley RHT with f16 "signs", 128-row-group expert maps, bucketed embed/head, and steering tensors.
