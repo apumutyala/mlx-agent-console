@@ -37,6 +37,12 @@ jobs:
           pip install numpy
           python -m unittest -v test_expert_repack test_expert_trace_sim
 
+      - name: lamq reference decoder tests (numpy)
+        working-directory: ios/tools/lamq
+        run: |
+          pip install numpy
+          python -m unittest -v test_lamq_ref test_steering_map
+
   ios:
     # Apple silicon runner with real Xcode, so MLX's Metal shaders compile.
     runs-on: macos-26   # Xcode 26.6 (mlx-swift-lm 3.33 needs Swift 6.3 tools)
@@ -96,6 +102,20 @@ jobs:
             echo "::warning::mlx checkout not found; compiling with the minimal prelude"
           fi
           python3 ios/tools/kernels/check_metal_kernels.py --out ios/build/metal-check --compile $ARGS
+
+      # lamq kernels are MLXFast.metalKernel strings the app build never compiles: rebuild the
+      # source MLX generates and compile it (docs/LAMQ-FORMAT-SPEC.md).
+      - name: Compile lamq Metal kernels
+        if: always() && hashFiles('ios/tools/kernels/check_lamq_metal_kernels.py') != ''
+        run: |
+          MLX=ios/build/SourcePackages/checkouts/mlx-swift/Source/Cmlx/mlx
+          ARGS=""
+          if [ -f "$MLX/mlx/backend/metal/kernels/utils.h" ]; then
+            ARGS="--mlx-include $MLX"
+          else
+            echo "::warning::mlx checkout not found; compiling with the minimal prelude"
+          fi
+          python3 ios/tools/kernels/check_lamq_metal_kernels.py --out ios/build/lamq-metal --compile $ARGS
 
       - name: Errors summary
         if: failure()

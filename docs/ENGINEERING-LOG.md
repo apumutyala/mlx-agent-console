@@ -29,6 +29,7 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 | `bench` | on-device profiler + receipts (O1) | `integration` | PR #7, merged into `integration-next` |
 | `integration-next` | `integration` + #7 + #2 with one unified load path | `integration` | to fast-forward `integration` |
 | `memory-harness` | durable chats, memory store, playbook, document tools | `liquid-models` | in progress |
+| `inkling-lamq` | LookAtMyQuant trellis Inkling builds: spec, bit-exact NumPy decoder, Metal kernels, self-check, 3.9 GB wired + pickable | `inkling2` | PR #11 open; compile-unverified (CI freeze) |
 
 **Rules for agents:**
 - Work only on your own branch, and open a PR into `integration`.
@@ -165,6 +166,30 @@ Receipts are in `docs/receipts/2026-11-27-round2/`. Device: iPad Pro M5, 16 GB, 
   - lamq 3.9 GB Inkling, fully resident (PR #11);
   - LFM2.5-8B-A1B streamed or GGUF mmap (PR #10, engine-ab A2–A7);
   - Inkling streaming (PR #9).
+### 2026-11-27: lamq 3.9 GB wired into Inkling 2 and pickable (`inkling-lamq`, PR #11 update)
+- **Wiring (patch D, compile-unverified):**
+  - `steering.safetensors` is mapped onto PR #821's layout. It is a pure rename plus a `[C,1,K]`→`[C,K,1]` conv transpose (conv weights rounded to bf16 for PR #821's epilogue kernel). lamq's forward was compared with PR #821 term by term: no reparametrisation.
+  - The 6 attention linears per layer, the embedding and the head are `Linear`/`Embedding` subclasses with `[rows, 0]` placeholders, so the factory's strict update still checks every other parameter.
+  - Experts: `mlp.experts` is now optional. Decode runs fused matvecs plus PR #821's epilogue; prefill runs per-expert f16 tiles.
+  - `VLMModelFactory` hands the directory to the model when `manifest.json` is lamq.
+- **Verified locally:** `test_steering_map.py` ports the Swift map and PR #821's parameter tree. Against the real 3.9 GB steering header: 0 missing, 0 extra, 0 shape mismatches over 645 entries.
+- **App:**
+  - New entry `inkling2-mini-lamq-3.9`: pinned revision, `.npz` download, 0.9 GB headroom, 4K context. The memory gate and benchmark skip take a per-entry headroom: needs ≈ 4.75 GB of the ≈ 5.2 GB available.
+  - 4.7 and 5.4 GB are held for the PR #9 interface (spec §11).
+- **Not run:** compile, device self-check, chat, and a greedy-agreement gate against lamq's CPU reference.
+
+### 2026-11-27: LookAtMyQuant Inkling builds (`inkling-lamq`, [PR #11](https://github.com/apumutyala/mlx-agent-console/pull/11), depends on `inkling2`)
+- **Spec:** `docs/LAMQ-FORMAT-SPEC.md` covers trellis `ht*`/`rtr*` (12-bit sliding state over a reversed little-endian row bitstream, ht = Fibonacci hash into 512/1024-entry f16 LUTs), Lloyd-Max `lm6`/`lm8`, NVFP4, Kronecker Sylvester×Paley RHT with f16 "signs", 128-row-group expert maps, bucketed embed/head, and steering tensors.
+  - NVFP4 passthrough ("23/192 hot buckets") is only in the 8.9/11.2 GB builds. The 3.9/4.7/5.4 GB builds are pure trellis + Lloyd-Max.
+- **Verified:** our NumPy decoder (`ios/tools/lamq/lamq_ref.py`) == LookAtMyQuant's own torch decoders (CPU), **bit-identical on 532 tensors**: 5.4 GB layers 0 and 7, every linear and all 256 expert sides each, plus 8 embed buckets. Digests are in `lamq_digests.json`. 19 NumPy tests pass, including the Metal index-math emulation.
+- **Written, compile-unverified (CI freeze):**
+  - MLXFast kernels: fused trellis/LM matvec for decode, f16 dequant tiles for prefill.
+  - STORED-npz `pread` loader, packed linear/expert/embed/head classes.
+  - On-device self-check: Settings › Inkling 2 Mini · LookAtMyQuant downloads layer 7 (~190 MB) and compares SHA-256 digests.
+  - CI steps: the NumPy tests, and `check_lamq_metal_kernels.py --compile` (156 instantiations).
+- **Not done:** wiring into `Inkling2.swift`. Steering uses HF transformers names, not PR #821's layout, so a name/reparametrisation map is needed. The lamq tiers are therefore listed in Settings with memory plans but are not pickable.
+- **Memory (estimates):** 3.9 GB build fits resident (~4.7 GB at 4K). 4.7 GB needs ~0.6 GB streamed and 5.4 GB ~1.3 GB, via the PR #9 slot cache with per-format slab records (to agree with PR #9).
+- **Licences:** the lamq runtime is MIT (no code copied; notice kept). The weights declare no licence; the base model is Apache-2.0. Weights are downloaded on device only, never redistributed.
 
 ### 2026-11-27 (morning): receipts round 1, polling incident, engine research
 - **Receipts round 1:** see Findings. The app's memory limit is about 5.3 GB, so resident Inkling and the 8B MoE (4-bit) don't fit.

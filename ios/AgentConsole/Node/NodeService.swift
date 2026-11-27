@@ -176,7 +176,10 @@ final class NodeService {
         UIApplication.shared.isIdleTimerDisabled = keepAwake && loop != nil
     }
 
-    private var canTrain: Bool { trainer != nil && acceptTraining }
+    /// LookAtMyQuant packed models have no LoRA-convertible linears (packed trellis layers).
+    private var canTrain: Bool {
+        trainer != nil && acceptTraining && ModelCatalog.selected.lamqRevision == nil
+    }
 
     private func nodeInfo() -> NodeInfo {
         let device = UIDevice.current
@@ -617,6 +620,7 @@ final class NodeService {
                           client: FleetClient) async throws -> TaskResult {
         guard let trainer else { throw NodeError.cannotTrain }
         guard acceptTraining else { throw NodeError.trainingOff }
+        guard ModelCatalog.selected.lamqRevision == nil else { throw NodeError.cannotTrain }
         let p = try FleetClient.decodeTask(data, payload: TrainPayload.self).payload
         let useDocuments = p.useLocalData ?? false
         if useDocuments && !allowDocumentTraining { throw NodeError.documentsOff }

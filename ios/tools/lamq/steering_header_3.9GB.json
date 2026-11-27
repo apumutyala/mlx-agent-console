@@ -1,0 +1,3458 @@
+{
+"model.embed_tokens.embed_norm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.final_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.0.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.0.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.0.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.0.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.0.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.0.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.0.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.0.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.0.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.0.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.0.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.0.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.0.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.1.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.1.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.1.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.1.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.1.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.1.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.1.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.1.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.1.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.1.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.1.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.1.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.1.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.1.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.10.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.10.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.10.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.10.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.10.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.10.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.10.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.10.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.10.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.10.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.10.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.10.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.10.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.10.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.10.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.10.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.10.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.10.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.10.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.10.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.attention_input.query": {
+"dtype": "F32",
+"shape": [
+3,
+2304
+]
+},
+"model.layers.11.k_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.11.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.11.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.11.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.11.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.11.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.11.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.11.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.11.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.11.q_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.11.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.11.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.self_attn.k_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.11.self_attn.k_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.11.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.11.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.11.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.11.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.11.self_attn.v_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.11.self_attn.v_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.11.v_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.11.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.11.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.11.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.12.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.12.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.12.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.12.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.12.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.12.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.12.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.12.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.12.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.12.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.12.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.12.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.12.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.12.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.12.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.12.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.12.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.12.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.12.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.13.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.13.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.13.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.13.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.13.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.13.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.13.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.13.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.13.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.13.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.13.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.13.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.13.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.13.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.13.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.13.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.13.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.13.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.13.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.14.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.14.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.14.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.14.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.14.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.14.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.14.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.14.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.14.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.14.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.14.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.14.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.14.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.14.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.14.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.14.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.14.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.14.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.14.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.15.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.15.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.15.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.15.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.15.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.15.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.15.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.15.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.15.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.15.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.15.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.15.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.15.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.15.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.15.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.15.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.15.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.15.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.15.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.16.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.16.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.16.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.16.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.16.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.16.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.16.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.16.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.16.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.16.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.16.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.16.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.16.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.16.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.16.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.16.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.16.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.16.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.16.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.attention_input.query": {
+"dtype": "F32",
+"shape": [
+3,
+2304
+]
+},
+"model.layers.17.k_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.17.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.17.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.17.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.17.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.17.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.17.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.17.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.17.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.17.q_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.17.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.17.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.self_attn.k_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.17.self_attn.k_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.17.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.17.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.17.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.17.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.17.self_attn.v_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.17.self_attn.v_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.17.v_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.17.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.17.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.17.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.18.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.18.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.18.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.18.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.18.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.18.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.18.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.18.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.18.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.18.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.18.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.18.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.18.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.18.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.19.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.19.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.19.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.19.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.19.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.19.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.19.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.19.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.19.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.19.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.19.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.19.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.19.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.19.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.2.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.2.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.2.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.2.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.2.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.2.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.2.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.2.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.2.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.2.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.2.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.2.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.2.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.2.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.20.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.20.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.20.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.20.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.20.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.20.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.20.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.20.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.20.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.20.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.20.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.20.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.20.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.20.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.21.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.21.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.21.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.21.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.21.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.21.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.21.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.21.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.21.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.21.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.21.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.21.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.21.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.21.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.22.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.22.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.22.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.22.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.22.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.22.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.22.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.22.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.22.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.22.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.22.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.22.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.22.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.22.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.23.attention_input.query": {
+"dtype": "F32",
+"shape": [
+3,
+2304
+]
+},
+"model.layers.23.k_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.23.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.23.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.23.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.23.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.23.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.23.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.23.q_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.23.self_attn.k_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.23.self_attn.k_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.23.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.23.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.23.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.23.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.23.self_attn.v_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.23.self_attn.v_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.23.v_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.3.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.3.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.3.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.3.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.3.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.3.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.3.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.3.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.3.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.3.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.3.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.3.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.3.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.3.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.4.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.4.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.4.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.4.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.4.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.4.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.4.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.4.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.4.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.4.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.4.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.4.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.4.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.4.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.5.attention_input.query": {
+"dtype": "F32",
+"shape": [
+3,
+2304
+]
+},
+"model.layers.5.k_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.5.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.5.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.5.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.5.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.5.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.5.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.5.q_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.5.self_attn.k_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.5.self_attn.k_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.5.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.5.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.5.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.5.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.5.self_attn.v_proj.sconv.static_weight": {
+"dtype": "BF16",
+"shape": [
+4,
+1024
+]
+},
+"model.layers.5.self_attn.v_proj.sconv.weight_proj.weight": {
+"dtype": "BF16",
+"shape": [
+32,
+2304
+]
+},
+"model.layers.5.v_input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.6.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.6.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.6.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.6.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.6.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.6.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.6.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.6.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.6.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.6.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.6.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.6.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.6.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.6.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.6.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.6.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.6.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.6.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.6.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.6.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.7.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.7.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.7.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.7.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.7.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.7.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.7.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.7.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.7.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.7.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.7.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.7.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.7.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.7.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.7.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.7.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.7.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.7.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.7.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.8.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.8.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.8.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.8.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.8.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.8.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.8.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.8.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.8.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.8.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.8.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.8.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.8.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.8.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.8.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.8.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.8.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.8.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.8.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.attention_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.9.input_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.9.k_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.9.k_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.k_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.mlp.gate.e_score_correction_bias": {
+"dtype": "F32",
+"shape": [
+128
+]
+},
+"model.layers.9.mlp.gate.weight": {
+"dtype": "F32",
+"shape": [
+128,
+2304
+]
+},
+"model.layers.9.mlp_input.query": {
+"dtype": "F32",
+"shape": [
+2304
+]
+},
+"model.layers.9.mlp_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.9.mlp_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.mlp_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.post_attention_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.9.post_attention_layernorm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+},
+"model.layers.9.post_mlp_convolution.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+1,
+4
+]
+},
+"model.layers.9.q_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.9.q_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.q_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.self_attn.k_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.9.self_attn.q_proj.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+128
+]
+},
+"model.layers.9.self_attn.relative_position_bias.norm.scale": {
+"dtype": "BF16",
+"shape": [
+24,
+16
+]
+},
+"model.layers.9.self_attn.relative_position_bias.proj": {
+"dtype": "BF16",
+"shape": [
+16,
+1024
+]
+},
+"model.layers.9.self_attn.sink_proj.weight": {
+"dtype": "BF16",
+"shape": [
+24,
+2304
+]
+},
+"model.layers.9.self_attn.v_proj.sconv.conv1d.weight": {
+"dtype": "F32",
+"shape": [
+1024,
+1,
+4
+]
+},
+"model.layers.9.v_message_gate.down_proj.weight": {
+"dtype": "BF16",
+"shape": [
+64,
+4608
+]
+},
+"model.layers.9.v_message_gate.forget_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.layers.9.v_message_gate.message_gate_proj.weight": {
+"dtype": "F32",
+"shape": [
+2304,
+64
+]
+},
+"model.message_input.query": {
+"dtype": "F32",
+"shape": [
+12,
+4,
+2304
+]
+},
+"model.norm.weight": {
+"dtype": "BF16",
+"shape": [
+2304
+]
+}
+}

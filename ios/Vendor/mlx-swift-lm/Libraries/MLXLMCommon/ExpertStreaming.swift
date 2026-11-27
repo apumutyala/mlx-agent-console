@@ -106,6 +106,14 @@ public enum ExpertStreaming {
         streamingState.withLock { $0.current }?.flushTrace()
     }
 
+    /// The first expert read (or slot binding) error since the last call, and clears it. A failed
+    /// read never crashes the process: the slots it was filling are released (a later call reads
+    /// them again), the step computes with whatever the slots hold, and the caller must check this
+    /// after each step and fail the request when it returns an error.
+    public static func takeError() -> Error? {
+        streamingState.withLock { $0.current }?.takeError()
+    }
+
     /// Bytes of `experts.bin` and the per-expert record sizes, without loading anything.
     public static func manifestSummary(directory: URL) throws -> (
         fileBytes: Int, expertBytes: Int, layers: Int, experts: Int
@@ -464,6 +472,20 @@ package final class ExpertStreamRuntime: @unchecked Sendable {
 
     package func flushTrace() { trace?.flush() }
 
+    /// The first unreported I/O failure (see `ExpertStreaming.takeError`).
+    private var failure: Error?
+
+    package func fail(_ error: Error) {
+        lock.withLock { if failure == nil { failure = error } }
+    }
+
+    package func takeError() -> Error? {
+        lock.withLock {
+            defer { failure = nil }
+            return failure
+        }
+    }
+
     deinit { trace?.flush() }
 }
 
@@ -690,9 +712,17 @@ package final class ExpertSlotCache {
 
     /// Makes every expert of `ids` resident and returns the slot of each id, in order. The distinct
     /// experts of `ids` must fit in `capacity`.
+    ///
+    /// Never traps on I/O: a failed bind or read is recorded on the runtime
+    /// (`ExpertStreaming.takeError()`), the slots of the failed reads are released so a later call
+    /// reads them again, and valid slot ids are still returned so the graph builds; the caller
+    /// fails the request after the step.
     package func ensure(_ ids: [UInt32]) -> [UInt32] {
         if !bound {
-            do { try bind() } catch { fatalError("Expert streaming: \(error)") }
+            do { try bind() } catch {
+                runtime.fail(ExpertStreamingError.binding("layer \(layer): \(error)"))
+                return ids.map { _ in 0 }
+            }
         }
         call += 1
         var needed = [Int16]()
@@ -736,7 +766,18 @@ package final class ExpertSlotCache {
             let readStart = DispatchTime.now().uptimeNanoseconds
             let failure = read(assigned)
             if let failure {
-                fatalError("Expert streaming, layer \(layer): \(failure)")
+                // Any of this call's reads may be incomplete: release every slot it assigned, so
+                // the next call rereads those experts, and report the error to the caller.
+                let slots = ids.map { UInt32(slotOf[Int($0)]) }
+                for (expert, slot) in assigned {
+                    slotOf[expert] = -1
+                    expertOf[slot] = -1
+                    score[slot] = 0
+                    loaded -= 1
+                    if !identity { free.append(Int16(slot)) }
+                }
+                runtime.fail(ExpertStreamingError.io("layer \(layer): \(failure)"))
+                return slots
             }
             runtime.record(
                 bytes: assigned.count * readSpan, read: expertStreamSeconds(since: readStart),

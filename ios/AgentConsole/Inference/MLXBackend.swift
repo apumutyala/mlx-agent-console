@@ -72,9 +72,16 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         case ModelCatalog.lfm25_1_2b.id, ModelCatalog.lfm25_350m.id:
             return ModelConfiguration(id: entry.repo, toolCallFormat: .lfm2)
         default:
+            if let revision = entry.lamqRevision {
+                return ModelConfiguration(id: entry.repo, revision: revision)
+            }
             return ModelConfiguration(id: entry.repo)
         }
     }
+
+    /// Files of a LookAtMyQuant packed build: the factory's own patterns plus the packed `.npz`
+    /// files, which it would not fetch (MLXVLM patch D, docs/LAMQ-FORMAT-SPEC.md).
+    static let lamqDownloadPatterns = ["*.npz", "*.safetensors", "*.json", "*.jinja"]
 
     /// Generation settings that bound memory for big models. The KV cache is deliberately
     /// *not* capped with `maxKVSize`: on Inkling that turns the global-attention layers into
@@ -289,6 +296,19 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
                 loaded = try await VLMModelFactory.shared.loadContainer(
                     from: streamedDirectory, using: #huggingFaceTokenizerLoader(), progress: weightsProgress)
             }
+        } else if let revision = target.lamqRevision {
+            // LookAtMyQuant packed build: fetch the pinned snapshot with its .npz files, then
+            // load it from the directory (patch D installs the packed layers).
+            let downloader = #hubDownloader()
+            let directory = try await downloader.download(
+                id: target.repo, revision: revision, matching: Self.lamqDownloadPatterns,
+                useLatest: false, progressHandler: { p in progress(0.9 * p.fractionCompleted) })
+            try Task.checkCancellation()
+            loaded = try await VLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: ModelConfiguration(directory: directory),
+                progress: handlers)
         } else {
             loaded = try await VLMModelFactory.shared.loadContainer(
                 from: #hubDownloader(),
@@ -591,7 +611,11 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let task = Task { [self] in
                 do {
+                    // A failed expert read (streamed tiers) is recorded, not fatal: drop any stale
+                    // one, then fail this reply at the first step that reports one.
+                    _ = Inkling2ExpertStreaming.takeError()
                     for try await item in upstream {
+                        if let failure = Inkling2ExpertStreaming.takeError() { throw failure }
                         switch item {
                         case .chunk(let text):
                             account(text.count)
@@ -613,6 +637,7 @@ final class MLXConversation: ModelConversation, @unchecked Sendable {
                         }
                     }
                     Inkling2ExpertStreaming.flushTrace()   // no-op unless the routing trace is on
+                    if let failure = Inkling2ExpertStreaming.takeError() { throw failure }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

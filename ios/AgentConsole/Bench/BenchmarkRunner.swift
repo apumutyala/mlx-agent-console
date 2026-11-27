@@ -108,11 +108,12 @@ struct BenchmarkRunner: Sendable {
                 model: entry.displayName, neededBytes: needed, budgetBytes: budget,
                 stillHeldBytes: MLX.Memory.activeMemory).localizedDescription)
         }
-        let need = entry.downloadGB * 1_000_000_000 + Self.headroomBytes
+        let headroom = entry.headroomGB.map { $0 * 1e9 } ?? Self.headroomBytes
+        let need = entry.downloadGB * 1_000_000_000 + headroom
         if need > Double(available) {
             return await finish("skipped", skip: String(
                 format: "needs ~%.1f GB (weights %.2f GB + %.1f GB headroom); %.1f GB available to the app",
-                need / 1e9, entry.downloadGB, Self.headroomBytes / 1e9, Double(available) / 1e9))
+                need / 1e9, entry.downloadGB, headroom / 1e9, Double(available) / 1e9))
         }
 
         do {
