@@ -74,6 +74,7 @@ struct DocumentsView: View {
                 }
             }
             .task { await refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: .documentsChanged)) { _ in Task { await refresh() } }
             .onChange(of: coordinator.active?.completedCount) { _, _ in Task { await refresh() } }
             .alert("Import failed", isPresented: .constant(error != nil)) {
                 Button("OK") { error = nil }
