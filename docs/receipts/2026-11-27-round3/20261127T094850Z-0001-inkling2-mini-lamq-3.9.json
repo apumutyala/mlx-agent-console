@@ -1,0 +1,79 @@
+{
+ "app_git_sha": "135cace6f197833c51b6a42ece899d8ef6dc2f73",
+ "app_version": "1.0 (1)",
+ "created_at": "2026-11-27T09:48:47Z",
+ "device": {
+  "machine": "iPad17,3",
+  "model": "iPad",
+  "os": "iPadOS 27.2.1",
+  "physical_memory_bytes": 16136650752,
+  "processor_count": 10
+ },
+ "engine": "mlx",
+ "engine_notes": {
+  "breadcrumb_phase": "first load",
+  "breadcrumb_started_at": "2026-11-27T09:45:37Z",
+  "breadcrumb_updated_at": "2026-11-27T09:45:37Z",
+  "found_at_launch": "2026-11-27T09:48:47Z",
+  "metal_residency": "on",
+  "note": "footprint/metal figures are the last values recorded before the kill, not a true peak"
+ },
+ "environment": {
+  "available_memory_after_bytes": 5356879080,
+  "available_memory_before_bytes": 5356879080,
+  "battery_level_after": 1,
+  "battery_level_before": 1,
+  "battery_state_after": "full",
+  "battery_state_before": "full",
+  "low_power_mode": false,
+  "thermal_after": "nominal",
+  "thermal_before": "nominal",
+  "thermal_max_during": "nominal"
+ },
+ "error": "The app was terminated during \u201cfirst load\u201d (no receipt was written). Most likely iOS's memory limit (jetsam); the breadcrumb can't tell jetsam from other kills.",
+ "identity": {
+  "bundle_identifier": "com.apumutyala.AgentConsole.L8T7GPUXTV",
+  "container_marker_created_at": "2026-11-27T09:29:19Z",
+  "container_marker_id": "5e2126db-7573-48d6-ba54-15d4b171bffa",
+  "container_path_hash": "2b897952b400bbac"
+ },
+ "jetsam_suspected": true,
+ "library": {
+  "mlx_swift": "0.33.x",
+  "mlx_swift_lm": "3.33.0"
+ },
+ "memory_probe": {
+  "available_after_load_bytes": 0,
+  "available_before_load_bytes": 5272975632,
+  "metal_allocated_after_load_bytes": 1769472,
+  "metal_allocated_max_bytes": 1769472,
+  "metal_recommended_max_working_set_bytes": 11453251584,
+  "phys_footprint_after_load_bytes": 95733488,
+  "phys_footprint_before_load_bytes": 0,
+  "phys_footprint_peak_bytes": 95733488
+ },
+ "model": {
+  "catalog_download_gb": 3.85,
+  "display_name": "Inkling 2 Mini \u00b7 LookAtMyQuant 1.2-bit",
+  "id": "inkling2-mini-lamq-3.9",
+  "repo": "shinmegamiboson/Inkling-2-Mini-LookAtMyQuant-3.9GB"
+ },
+ "params": {
+  "memory_sample_interval_ms": 50,
+  "mlx_cache_limit_bytes": 33554432,
+  "prompt_mode": "raw token ids, no chat template; filled prompts cut to exact length",
+  "repetitions": 5,
+  "seed": 1234,
+  "settle_s": 10,
+  "stop_tokens": "ignored: every rep decodes max_tokens (first stop index recorded)",
+  "temperature": 0,
+  "timing": "wall clock around mlx-swift-lm TokenIterator; ttft = init + first next(); decode_tps = (n-1)/(t_last - t_first); one untimed warm-up per workload",
+  "warmup_tokens": 8
+ },
+ "receipt_id": "a792fbdd-39ca-44ad-b7fa-ad674ac7c8cc",
+ "schema": 1,
+ "status": "killed",
+ "total_wall_s": 0,
+ "workload_set": "w2",
+ "workloads": []
+}
