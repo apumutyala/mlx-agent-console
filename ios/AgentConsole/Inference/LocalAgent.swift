@@ -13,6 +13,8 @@ final class LocalAgent {
         var text: String
         /// Hidden reasoning (`<think>`), shown collapsed under assistant turns.
         var thinking = ""
+        /// Tool output that came from another machine (untrusted for memory).
+        var remote = false
     }
 
     private(set) var turns: [Turn] = []
@@ -37,17 +39,66 @@ final class LocalAgent {
         }
     }
 
-    init(backend: any ModelBackend, documents: DocumentStore, tools: @escaping () -> ToolRegistry) {
+    /// Persistent memory (history, retrieval, reflection). Optional so the
+    /// agent still works without it (previews/tests).
+    let memory: MemoryHarness?
+    /// Identity of the current chat in the conversation store.
+    private(set) var conversationID = UUID()
+    /// Turns of a resumed chat, replayed into the first prompt of the new session.
+    private var resumedTurns: [StoredTurn] = []
+
+    init(backend: any ModelBackend, documents: DocumentStore, memory: MemoryHarness? = nil,
+         tools: @escaping () -> ToolRegistry) {
         self.backend = backend
         self.documents = documents
+        self.memory = memory
         self.toolsProvider = tools
     }
 
+    /// New chat. The finished one stays in history and is reflected on.
     func reset() {
         task?.cancel()
+        // A turn parked on a confirmation alert must not run its tool later.
+        answerConfirmation(false)
+        persist()
+        memory?.conversationEnded(conversationID)
         conversation = nil
         tools = nil
         turns = []
+        resumedTurns = []
+        conversationID = UUID()
+    }
+
+    /// Reopens a saved chat. The model gets a fresh session primed with the
+    /// tail of the saved transcript.
+    func resume(_ id: UUID) {
+        guard id != conversationID, let stored = memory?.storedTurns(id) else { return }
+        reset()
+        conversationID = id
+        resumedTurns = stored
+        turns = stored.map { t in
+            let role: Turn.Role = switch t.role {
+            case .user: .user
+            case .assistant: .assistant
+            case .tool: .tool
+            case .error: .error
+            }
+            return Turn(role: role, text: t.text, thinking: t.thinking, remote: t.remote)
+        }
+    }
+
+    private func persist() {
+        guard let memory else { return }
+        let stored = turns.map { t -> StoredTurn in
+            let role: StoredTurn.Role = switch t.role {
+            case .user: .user
+            case .assistant: .assistant
+            case .tool: .tool
+            case .error: .error
+            }
+            return StoredTurn(role: role, text: t.text, thinking: t.thinking, remote: t.remote)
+        }
+        memory.persist(conversationID: conversationID, turns: stored)
     }
 
     func stop() { task?.cancel() }
@@ -85,9 +136,12 @@ final class LocalAgent {
         guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         turns.append(Turn(role: .user, text: text))
         isRunning = true
+        let chat = conversationID
         task = Task { [weak self] in
             await self?.run(userMessage: text)
             self?.isRunning = false
+            // Skip if the user already switched chats (reset() saved this one).
+            if self?.conversationID == chat { self?.persist() }
         }
     }
 
@@ -96,10 +150,10 @@ final class LocalAgent {
         pendingConfirmation = nil
     }
 
-    private func instructions(tools: ToolRegistry) async -> String {
+    private func instructions(tools: ToolRegistry, firstMessage: String) async -> String {
         let files = await documents.all().map { "- \($0.id): \($0.name)" }.joined(separator: "\n")
         let device = UIDevice.current.model   // "iPad" / "iPhone"
-        return """
+        let base = """
         You are Agent Console's on-device model (\(backend.displayName)), running locally on the user's \(device) via MLX. \
         Nothing leaves the device unless a tool sends it, and worker jobs always need the user's approval.
         Be concise: answer in a few sentences or a short list, no preamble.
@@ -108,6 +162,10 @@ final class LocalAgent {
         Imported files (id: name):
         \(files.isEmpty ? "(none)" : files)
         """
+        guard let memory else { return base }
+        let context = await memory.systemContext(firstMessage: firstMessage, conversationID: conversationID,
+                                                 resumed: resumedTurns)
+        return base + "\n\n" + context
     }
 
     private enum Next {
@@ -115,28 +173,47 @@ final class LocalAgent {
         case toolResult(ToolResultMessage)
     }
 
+    /// Appends only while `chat` is still the open conversation, so a turn
+    /// cancelled by New chat / delete / resume can't write into the next one.
+    private func append(to chat: UUID, _ turn: Turn) {
+        guard conversationID == chat else { return }
+        turns.append(turn)
+    }
+
+    private func ensureCurrent(_ chat: UUID) throws {
+        guard conversationID == chat else { throw CancellationError() }
+    }
+
     private func run(userMessage: String) async {
+        let chat = conversationID
         do {
+            // Reflection/embedding must not share the GPU with this turn
+            // (cancelled before we queue for the gate, so no gate deadlock).
+            await memory?.preemptBackgroundWork()
             // Model load and conversation setup touch the GPU: take the shared gate so a
             // fleet task or batch summary can't run at the same time.
-            let (conversation, tools, generation): (any ModelConversation, ToolRegistry, Int) = try await withGPU {
+            let (conversation, tools, prefix, generation): (any ModelConversation, ToolRegistry, String, Int) = try await withGPU {
                 if !(await backend.isLoaded) {
                     try await backend.load { _ in }
                 }
                 if let existing = self.conversation, let registry = self.tools {
-                    return (existing, registry, self.modelGeneration)
+                    // Later turns: memories newly relevant to this message ride along with it.
+                    let note = await memory?.turnContext(userMessage, conversationID: conversationID)
+                    return (existing, registry, note ?? "", self.modelGeneration)
                 }
                 let registry = toolsProvider()
                 let fresh = try await backend.makeConversation(
-                    instructions: await instructions(tools: registry), tools: registry.specifications)
+                    instructions: await instructions(tools: registry, firstMessage: userMessage),
+                    tools: registry.specifications)
                 self.tools = registry
                 self.conversation = fresh
-                return (fresh, registry, self.modelGeneration)
+                return (fresh, registry, "", self.modelGeneration)
             }
 
-            var next = Next.user(userMessage)
+            var next = Next.user(prefix + userMessage)
             for _ in 0...Self.maxToolSteps {
                 try Task.checkCancellation()
+                try ensureCurrent(chat)
                 turns.append(Turn(role: .assistant, text: ""))
                 let idx = turns.count - 1
                 var raw = ""
@@ -157,6 +234,7 @@ final class LocalAgent {
                 }
                 for try await event in stream {
                     try Task.checkCancellation()
+                    try ensureCurrent(chat)
                     switch event {
                     case .text(let chunk): raw += chunk
                     case .reasoning(let chunk): reasoning += chunk
@@ -172,11 +250,12 @@ final class LocalAgent {
                 }
                 }
 
+                try ensureCurrent(chat)
                 if let rejection, nativeCall == nil {
                     // The library rolls a rejected turn (and its prompt) out of the
                     // transcript, so restate the request along with the problem.
                     turns[idx].text = turns[idx].text.isEmpty ? "→ (invalid tool call)" : turns[idx].text
-                    turns.append(Turn(role: .tool, text: "ERROR: tool call rejected (\(rejection))"))
+                    append(to: chat, Turn(role: .tool, text: "ERROR: tool call rejected (\(rejection))"))
                     let original: String
                     switch next {
                     case .user(let text): original = "The user's request was: \(text)"
@@ -202,14 +281,15 @@ final class LocalAgent {
                     // Errors go back to the model so it can correct itself.
                     result = "ERROR: \(error.localizedDescription)"
                 }
-                turns.append(Turn(role: .tool, text: result))
+                try ensureCurrent(chat)
+                append(to: chat, Turn(role: .tool, text: result, remote: MemoryHarness.isRemoteTool(call.name)))
                 next = .toolResult(ToolResultMessage(callID: call.id, name: call.name, content: result))
             }
-            turns.append(Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))
+            append(to: chat, Turn(role: .error, text: "Stopped after \(Self.maxToolSteps) tool steps."))
         } catch is CancellationError {
-            turns.append(Turn(role: .error, text: "Stopped."))
+            append(to: chat, Turn(role: .error, text: "Stopped."))
         } catch {
-            turns.append(Turn(role: .error, text: error.localizedDescription))
+            append(to: chat, Turn(role: .error, text: error.localizedDescription))
         }
     }
 

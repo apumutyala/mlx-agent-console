@@ -13,8 +13,6 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
     private var container: ModelContainer?
     /// Bumped on every switch so a load that finishes late can't install a stale model.
     private var epoch = 0
-    /// The load in flight for `epoch`, shared by concurrent `load` callers.
-    private var loading: (epoch: Int, task: Task<ModelContainer, Error>)?
     private let lock = NSLock()
 
     init(entry: ModelCatalog.Entry = ModelCatalog.selected) {
@@ -67,37 +65,26 @@ final class MLXBackend: ModelBackend, @unchecked Sendable {
         if changed { MLX.Memory.clearCache() }
     }
 
-    /// Single-flight: concurrent callers (chat, node, summarizer) share one
-    /// in-flight load per selection epoch instead of loading the weights twice,
-    /// and a published container is never replaced by a second load.
+    /// Loads inline, in the caller's task, so cancelling the caller (pause,
+    /// Serve off, chat Stop) cancels the download. Every caller holds `GPUGate`,
+    /// which serializes loads; a weight read that can't be interrupted simply
+    /// finishes while its caller still holds the gate, so no second load can
+    /// overlap it. A container that is already published is never replaced.
     func load(progress: @escaping @Sendable (Double) -> Void) async throws {
         reconcileSelection()
         if await isLoaded { progress(1); return }
-        let (task, startEpoch): (Task<ModelContainer, Error>, Int) = lock.withLock {
-            if let l = loading, l.epoch == epoch { return (l.task, l.epoch) }
-            let target = entry
-            let t = Task { () async throws -> ModelContainer in
-                // Keep MLX's buffer cache modest on iPad; weights dominate memory.
-                MLX.Memory.cacheLimit = 32 * 1024 * 1024
-                return try await #huggingFaceLoadModelContainer(
-                    configuration: Self.configuration(for: target),
-                    progress: .download { p in progress(p.fractionCompleted) }
-                )
-            }
-            loading = (epoch, t)
-            return (t, epoch)
+        let (target, startEpoch) = lock.withLock { (entry, epoch) }
+        // Keep MLX's buffer cache modest on iPad; weights dominate memory.
+        MLX.Memory.cacheLimit = 32 * 1024 * 1024
+        let loaded = try await #huggingFaceLoadModelContainer(
+            configuration: Self.configuration(for: target),
+            progress: .download { p in progress(p.fractionCompleted) }
+        )
+        try Task.checkCancellation()
+        lock.withLock {
+            if epoch == startEpoch, container == nil { container = loaded }
         }
-        do {
-            let loaded = try await task.value
-            lock.withLock {
-                if epoch == startEpoch, container == nil { container = loaded }
-                if loading?.epoch == startEpoch { loading = nil }
-            }
-            progress(1)
-        } catch {
-            lock.withLock { if loading?.epoch == startEpoch { loading = nil } }
-            throw error
-        }
+        progress(1)
     }
 
     func makeConversation(instructions: String, tools: [ToolSpecification]) async throws -> any ModelConversation {

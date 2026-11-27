@@ -9,11 +9,12 @@ import UIKit
 /// chat or a summary batch (all model work goes through `GPUGate`).
 ///
 /// iOS only lets the app use the network and GPU in the foreground, so the
-/// node pauses as soon as the scene stops being active (.inactive, then
-/// .background) and resumes when it's active again. A task in flight at that
-/// moment is *released*, not reported: the node stops working on it and never
-/// calls /complete, so the worker requeues it (on the node's next poll, or by
-/// the offline sweep). A finished task's result is kept in a small persisted
+/// node pauses when the app goes to the background and resumes when it's
+/// active again. (.inactive alone, e.g. Control Center or a system alert,
+/// doesn't pause: Metal is still allowed there, and every release costs the
+/// task a server attempt.) A task in flight at that moment is *released*, not
+/// reported: the node stops working on it and never calls /complete, so the
+/// worker requeues it (on the node's next poll, or by the offline sweep). A finished task's result is kept in a small persisted
 /// outbox and resent with backoff until the worker settles it (2xx/404/409),
 /// always before the node asks for more work.
 ///
@@ -79,11 +80,18 @@ final class NodeService {
     @ObservationIgnored private var winding: Task<Void, Never>?
     @ObservationIgnored private var currentGrace: BackgroundGrace?
     @ObservationIgnored private var heartbeatDue = false
-    /// False from .inactive until .active: no new MLX work while the app leaves the foreground.
+    /// False from .background until .active: no new MLX work in the background.
     @ObservationIgnored private var sceneActive = true
-    /// The chat's adapter, when a training task ended while the app was leaving
-    /// the foreground (restored on return, before any other model work).
-    @ObservationIgnored private var pendingRestore: Data?
+    /// The chat's adapter, when a training task ended while the app was in the
+    /// background. While it is set the node keeps holding `GPUGate` (training
+    /// weights are still loaded), and `applyPendingRestore` restores the adapter
+    /// and only then releases the gate.
+    @ObservationIgnored private var pendingRestore: PendingRestore?
+
+    private struct PendingRestore {
+        let snapshot: Data
+        let converted: Bool
+    }
 
     init(backend: any ModelBackend, documents: DocumentStore, trainer: FederatedTrainer?,
          onModelChanged: @escaping @MainActor () -> Void) {
@@ -113,10 +121,10 @@ final class NodeService {
             if pendingRestore != nil { Task { await self.applyPendingRestore() } }
             resumeIfEnabled()
         case .inactive:
-            // Stop MLX work now, while Metal is still allowed, rather than at
-            // .background when the grace window would keep it running.
-            sceneActive = false
-            pause(status: "Paused (app inactive)")
+            // Control Center, alerts, the app switcher: Metal is still allowed and the
+            // app usually comes straight back, so keep working. Releasing here would
+            // burn a server attempt per interruption.
+            break
         case .background:
             sceneActive = false
             pause(status: "Paused (app in background)")
@@ -274,7 +282,9 @@ final class NodeService {
             } catch {
                 result = taskResult(after: error, buffer: buffer)
             }
-            await GPUGate.shared.release()
+            // A deferred adapter restore keeps the gate: the training weights are still
+            // loaded, and nothing else may run on them until applyPendingRestore.
+            if pendingRestore == nil { await GPUGate.shared.release() }
         } catch {
             // Cancelled while queued behind the chat or a summary.
             result = taskResult(after: error, buffer: buffer)
@@ -570,14 +580,9 @@ final class NodeService {
 
         status = "Preparing LoRA"
         let converted = try await trainer.ensureAdapter(rank: rank, layers: layers, seed: seed)
-        // What the chat runs on now (a restore still pending counts as that).
-        let snapshot: Data
-        if let pending = pendingRestore {
-            snapshot = pending
-        } else {
-            snapshot = try await trainer.snapshot()
-        }
-        pendingRestore = nil
+        // What the chat runs on now. (No restore can be pending here: a pending
+        // restore holds the gate, and we hold it.)
+        let snapshot = try await trainer.snapshot()
 
         let outcome: FederatedTrainer.Outcome
         do {
@@ -615,12 +620,11 @@ final class NodeService {
     }
 
     /// Puts the chat's adapter back after a training task (caller holds the gate).
-    /// While the app is leaving the foreground no Metal work is started: the
-    /// restore waits for the next .active.
+    /// In the background no Metal work is started: the restore waits for the next
+    /// .active, and the gate stays held until then (see `execute`).
     private func restoreChatAdapter(_ snapshot: Data, trainer: FederatedTrainer, converted: Bool) async {
         guard sceneActive else {
-            pendingRestore = snapshot
-            onModelChanged()   // weights are off until the restore; don't continue old chats on them
+            pendingRestore = PendingRestore(snapshot: snapshot, converted: converted)
             return
         }
         do {
@@ -635,22 +639,21 @@ final class NodeService {
         }
     }
 
+    /// Finishes a deferred restore. The gate is still held from the training task,
+    /// so this restores first and then releases it.
     private func applyPendingRestore() async {
-        guard sceneActive, let trainer, let snapshot = pendingRestore else { return }
+        guard sceneActive, let pending = pendingRestore else { return }
         pendingRestore = nil
-        do {
-            try await GPUGate.shared.acquire("restore adapter")
-        } catch {
-            if pendingRestore == nil { pendingRestore = snapshot }
-            return
+        if let trainer {
+            do {
+                try await trainer.loadAdapter(pending.snapshot)
+                if pending.converted { onModelChanged() }
+            } catch {
+                try? await trainer.resetToBase()
+                adapterStatus = "Couldn't restore the chat's adapter after training (\(error.localizedDescription)); chat is back on the base model."
+                onModelChanged()
+            }
         }
-        do {
-            try await trainer.loadAdapter(snapshot)
-        } catch {
-            try? await trainer.resetToBase()
-            adapterStatus = "Couldn't restore the chat's adapter after training (\(error.localizedDescription)); chat is back on the base model."
-        }
-        onModelChanged()
         await GPUGate.shared.release()
     }
 
@@ -702,7 +705,6 @@ final class NodeService {
                 try await trainer.ensureAdapter(rank: round.hyperparameters.rank,
                                                 layers: round.hyperparameters.layers, seed: round.seed ?? 1234)
                 try await trainer.loadAdapter(bytes)
-                pendingRestore = nil   // the user's choice supersedes a deferred restore
                 onModelChanged()       // inside the gate: no chat step can slip in on stale KV
                 await GPUGate.shared.release()
             } catch {

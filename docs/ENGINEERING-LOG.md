@@ -110,6 +110,34 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
 - **Chat weights:** a train task snapshots the chat's adapter and restores it afterwards, including on failure or cancel. Only "Use federated adapter" changes what the chat runs on.
 - **GPU gate:** `GPUGate.acquire` is now `async throws` and responds to cancellation. **Other branches that call `await GPUGate.shared.acquire(...)` must change it to `try await`.** `ModelConversation` gains `synchronize()`. The gate is released only after a cancelled generation has really stopped.
 - **Status:** CI build only (see the PR); nothing has run on a device.
+- **PR #6 review (3 MEDIUM findings, `docs/review/2026-11-27-pr6.json`):**
+  1. A deferred adapter restore used to release the gate while training weights were still loaded. Now the gate stays held until `applyPendingRestore` has restored the adapter; that runs on the next `.active` or the next loop pass.
+  2. The node no longer pauses at `.inactive`, only at `.background`. Every release burns a server attempt, so two Control Center pulls could mark a task `lost`.
+  3. `MLXBackend.load` is inline again, so it is cancellable. Every caller holds `GPUGate`, which already serializes loads, and a weight read that can't be stopped finishes while its caller still holds the gate. The diff to PR #2's `inflight`/`draining` load stays small.
+- **Merged `integration`** (PR #3 memory harness, PR #4 worker). `MemoryHarness.withGPU` now uses `try await GPUGate.shared.acquire`.
+
+### 2026-11-26 (night): review → fixes → PRs
+- **Review results:** the review workflow (149 agents) confirmed 43 findings: 6 high, 22 medium, 15 low. They are split by area in `docs/review/2026-11-26-*.json`, and 5 were rejected.
+- **PRs:**
+  - [#2](https://github.com/apumutyala/mlx-agent-console/pull/2) `inkling2`: vendored #821 + Fix A + draft exclusion. Tiers: DWQ 3.1bpw 9.6 GB (default), jang-small 10.45 GB, jang 12.49 GB (stretch). Memory gating, and a memory readout in Settings. Fix B (mlx-vlm layout) is parked because mixed gate/up bits can't fuse losslessly. CI green.
+  - [#3](https://github.com/apumutyala/mlx-agent-console/pull/3) `memory-harness`: chats, memory store, BM25 + LFM2.5 embeddings, playbook with versions, document tools. CI green.
+  - [#4](https://github.com/apumutyala/mlx-agent-console/pull/4) `fix-worker` (coordinator): 15 worker findings fixed. 49 worker tests pass.
+- **In progress:** `fix-node` (20 iPad findings + training opt-in), `fix-speech` (8 findings, invalid Kokoro voice id), `bench` (profiler/receipts), `inkling-stream` (SSD expert streaming per `docs/INKLING-SSD-EXPERT-STREAMING-DESIGN.md`).
+- **Streaming design takeaways:**
+  - mmap does not work on iPadOS: Metal pins the whole buffer, and the page cache never warms.
+  - Use per-layer slot tensors plus `preadv` into them.
+  - Modelled: 2/3-bit at 25% resident ≈ 4.5 GB / ~12 tok/s; 4-bit at 50% ≈ 9.2 GB / ~16 tok/s. Hit rate and sync cost are unmeasured.
+- **Process note:** the PR review workflow for #2–#4 is running. Merges wait on its confirmed findings.
+### 2026-11-27: memory harness (`memory-harness`)
+- **What:** `ios/AgentConsole/Memory/` adds saved chats (resume, rename, delete) and a typed memory store (fact, episode, lesson, world).
+  - Retrieval is hybrid: BM25 always, plus optional LFM2.5-Embedding-350M-4bit through MLXEmbedders 3.33.0.
+  - Each conversation starts with a budgeted system block: a situation report (time, device, model, documents, worker jobs, fleet nodes), the playbook, and the top-k memories. The default budget is 1200 tokens.
+  - A versioned, self-maintained playbook can be rolled back.
+  - A reflection pass runs after each chat or every 6 user turns. Its output is strict JSON, validated in Swift, and no tools run during it.
+  - New tools: `remember`, `recall`, `forget` (asks the user to confirm), `create_document`, `append_to_document`, `list_documents`.
+- **Safety:** chats that contain worker or fleet output produce `untrusted` memories. Playbook edits from those chats, and from imported files, wait for the user's approval.
+- **GPU:** reflection and embedding take `GPUGate`, are cancelled before each chat turn, and never run in the background (no Metal there). The embedder is unloaded whenever `downloadGB + 0.8 > 0.45 × RAM`, so it is off for Inkling-size models.
+- **Status:** CI is green; nothing has run on a device yet.
 
 ### 2026-11-26 (later): goal set, slots filled
 - **Goal:** the user set the standing goal, which is recorded in the Goal section.
