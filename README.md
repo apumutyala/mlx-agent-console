@@ -199,6 +199,35 @@ claude mcp add --transport http job-worker http://127.0.0.1:8788/mcp --header "A
 - log paging that stays within the size budget and resumes exactly where it stopped
 - a session driven by the **official MCP Python SDK client** (v2.3.0), as an independent compatibility check
 
+## Compute fleet and federated training
+
+The worker also coordinates a **fleet of devices** (the iPad, other Macs/iPhones) that run models
+locally. Devices never accept inbound connections: each one sends heartbeats, long-polls for its
+next task, streams tokens back, uploads artifacts, and reports a result. That works through NAT,
+Tailscale, and iOS's networking rules (the app serves while it is open, or during a
+user-started continued-processing task).
+
+| | |
+|---|---|
+| Protocol + storage | [`worker/fleet.py`](worker/fleet.py): nodes, task queue, long-poll, cancel, requeue when a node vanishes (max 2 attempts), artifacts |
+| Federated rounds | [`worker/federated.py`](worker/federated.py): one `train_lora` task per device, then a weighted **FedAvg** of the uploaded LoRA adapters (stdlib safetensors F32/F16/BF16) |
+| Claude tools | `list_nodes`, `run_on_node`, `broadcast_prompt` (same prompt on every device, in parallel), `get_task`, `cancel_task`, `start_fed_round`, `get_fed_rounds` |
+| Tests | `worker/test_fleet.py` (simulated nodes over HTTP, FedAvg numerics, restart/offline requeue); `test_mcp_bridge.test_fleet_tools` |
+
+**Federated LoRA round**:
+1. The coordinator sends each device the same seed, rank and layer count, plus the previous global adapter when there is one.
+2. Each device trains on its own documents and/or a shard of examples. Raw data never leaves the device.
+3. Each device uploads `adapter.safetensors`.
+4. The coordinator averages the adapters, weighted by example count, and publishes the result at `/fed/rounds/{id}/adapter`.
+
+The iPad reaches the worker over the tailnet only (`tailscale serve --https=8443 http://127.0.0.1:8787`). Only the MCP bridge is on the public Funnel.
+
+**What iOS does not allow:**
+- Controlling other apps, firmware, or which apps run in the background.
+- A permanently running background server.
+
+On a device that allows background GPU, a node serves in the foreground or inside a `BGContinuedProcessingTask` that you start. Everything in this repo stays inside those rules.
+
 ## Security notes
 
 - Never expose the worker to the open internet. Use Tailscale or a VPN, or put it behind a TLS proxy. The app's ATS settings only allow plain `http` to local and IP addresses.
