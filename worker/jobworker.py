@@ -374,7 +374,9 @@ class Worker:
         return self.create(job.meta["type"], job.meta["params"], retry_of=job.id)
 
 
-def make_handler(worker: Worker, token: str):
+def make_handler(worker: Worker, token: str, router=None):
+    """`router(method, parts, query, read_json, read_raw)` may claim extra
+    routes (the compute fleet); it returns None, (status, dict) or (status, Path)."""
     token_b = token.encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -410,6 +412,46 @@ def make_handler(worker: Worker, token: str):
                 raise ValueError("body must be an object")
             return body
 
+        def _raw(self, limit: int = 300 * 1024 * 1024) -> bytes:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > limit:
+                raise ValueError("body too large")
+            return self.rfile.read(n) if n else b""
+
+        def _send_file(self, path: Path) -> None:
+            size = path.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            with path.open("rb") as f:
+                while chunk := f.read(1 << 20):
+                    self.wfile.write(chunk)
+
+        def _route(self, method: str) -> bool:
+            if router is None:
+                return False
+            url = urlparse(self.path)
+            parts = [p for p in url.path.split("/") if p]
+            try:
+                out = router(method, parts, parse_qs(url.query), self._body, self._raw)
+            except (ValueError, json.JSONDecodeError) as e:
+                out = (400, {"error": str(e)})
+            if out is None:
+                return False
+            status, body = out
+            if isinstance(body, Path):
+                self._send_file(body)
+            else:
+                self._send(status, body)
+            return True
+
+        def do_PUT(self):
+            if not self._auth():
+                return
+            if not self._route("PUT"):
+                self._send(404, {"error": "not found"})
+
         def _job(self, job_id: str) -> Job | None:
             job = worker.jobs.get(job_id)
             if job is None:
@@ -417,7 +459,7 @@ def make_handler(worker: Worker, token: str):
             return job
 
         def do_GET(self):
-            if not self._auth():
+            if not self._auth() or self._route("GET"):
                 return
             url = urlparse(self.path)
             parts = [p for p in url.path.split("/") if p]
@@ -452,7 +494,7 @@ def make_handler(worker: Worker, token: str):
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            if not self._auth():
+            if not self._auth() or self._route("POST"):
                 return
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             try:
@@ -489,8 +531,8 @@ def load_job_types(path: Path) -> dict[str, JobType]:
     return types
 
 
-def serve(worker: Worker, token: str, host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), make_handler(worker, token))
+def serve(worker: Worker, token: str, host: str, port: int, router=None) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((host, port), make_handler(worker, token, router))
     server.daemon_threads = True
     return server
 
@@ -507,9 +549,12 @@ def main() -> None:
     if len(token) < 24:
         sys.exit("set WORKER_TOKEN to a random secret of at least 24 chars")
     worker = Worker(args.data, load_job_types(args.config))
-    server = serve(worker, token, args.host, args.port)
+    from federated import make_router  # compute fleet + federated rounds
+    router, fleet = make_router(args.data)
+    server = serve(worker, token, args.host, args.port, router)
     print(f"jobworker listening on http://{args.host}:{args.port} "
-          f"({len(worker.job_types)} job types, {len(worker.jobs)} persisted jobs)")
+          f"({len(worker.job_types)} job types, {len(worker.jobs)} persisted jobs, "
+          f"{len(fleet.nodes)} known nodes)")
     server.serve_forever()
 
 
