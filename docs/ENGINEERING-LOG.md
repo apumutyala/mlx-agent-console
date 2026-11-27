@@ -184,6 +184,26 @@ New entries go at the top of [Log](#log). Every agent appends an entry when it o
   - Runtime gate: needs weights + 1.5 GiB ≤ `os_proc_available_memory()` (+ MLX buffer cache only, not memory a live chat/task may hold); Settings shows the readout, a load report and a killed-load breadcrumb. Compiled only; nothing ran on the iPad.
   - PR #2 review (9 confirmed) all addressed: superseded weight reads are drained before the next load; single load decision under the container lock with progress fan-out; per-load breadcrumb token; `.remainder` prefill chunking for big models (no ChatSession KV checkpoint copies); no `maxKVSize` for Inkling (global layers would rotate and drop the system prompt), replaced by a per-conversation context budget that errors "start a new chat".
 
+### 2026-11-27 (morning): receipts round 1, polling incident, engine research
+- **Receipts round 1:** see Findings. The app's memory limit is about 5.3 GB, so resident Inkling and the 8B MoE (4-bit) don't fit.
+- **Polling incident (negative result):**
+  - Six agents ran `gh run watch` at a 3 s interval and exhausted the shared 5,000/h GitHub API budget. Everyone went blind for about 10 minutes.
+  - **Fix:** a single shared poller `tools/ci_status.py`, which makes 1 call every 2 min and backs off when the budget is low. Agents wait on the local file. AGENTS.md now has a hard rule, and it is saved to memory.
+- **Merged into `integration`:** PRs #3 (memory), #4 (worker), #5 (speech), #6 (node). The merge agent is combining #7 (bench) and #2 (inkling2) on `integration-next`.
+- **Engine research** (`docs/ENGINES-RESEARCH-2026-11-27.md`, with critique):
+  - **Strata** = Niko1221/Strata (MIT). It is macOS/Windows/Linux only, with no iOS build. **Not adopted.** Its expert-streaming design is borrowed into our MLX streaming.
+  - **Xybrid's llama.cpp LLM path** supports `lfm2moe` (not `inkling2_loop`) and loads with mmap. We'll run an A/B against MLX for LFM2.5 1.2B and 8B-A1B GGUFs (3.3–4.8 GB). A6/A7 test whether mmapped weights escape the 5.3 GB limit. Agent `engine-ab` is on it.
+  - **Cactus, Nexa, ZETIC, LEAP and others:** assessed from documentation only, with no hands-on build. None beats MLX plus streaming for our goals.
+  - **Storage:**
+    - Weights are in purgeable `Library/Caches`, so they move to Application Support.
+    - Loading becomes offline-first.
+    - Fixing the `weight_files_bytes` bug.
+  - **Critique corrections:**
+    - Inkling makes 48 logical layer visits per token, about 0.96 GB of expert reads per token at 2.5 bpw.
+    - A bounded slot pool constrains prefill (micro-batch × top-k ≤ slots).
+    - LFM2.5-8B-A1B MLX 3-bit is estimated at 80–150 tok/s.
+    - LookAtMyQuant 5.4 GB (~1.65 bpw) is a future low-bit route.
+
 ### 2026-11-26 (night): `fix-node`, review fixes for the iPad compute node
 - **Scope:** the 20 confirmed findings in `docs/review/2026-11-26-ios-node.json`, plus the device half of the HIGH privacy finding in `docs/review/2026-11-26-worker.json` (federated.py:171). The worker Python side is a separate agent's job; no `worker/*.py` edits here.
 - **Protocol (needs the worker fix):** a paused node now *releases* its task: it stops and never calls `/complete`. The worker requeues the task when the same node polls again or when the sweep runs. Finished results go to a persisted outbox (`node.pendingCompletions`). The outbox retries with backoff until the worker answers 2xx, 404 or 409, and it is flushed before every poll. Metrics are NaN/Inf-safe. Heartbeats carry a new key, `capabilities.train_on_documents`.
